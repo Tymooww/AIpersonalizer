@@ -6,17 +6,25 @@ from langchain_core.messages import ToolMessage
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import tool
 from langgraph.graph.message import add_messages
-from langchain_ollama import ChatOllama
+from langchain_litellm import ChatLiteLLM
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
 import os
 import requests
 
 
+
 # region Initialization of LLM and CMS
 def initialize_config():
-    llm = ChatOllama(base_url='http://localhost:11434', model="qwen3")
     load_dotenv()
+
+    llm_config = ChatLiteLLM(
+        model = os.getenv("BONZAI_MODEL"),
+        api_key = os.getenv("BONZAI_API_KEY"),
+        api_base= os.getenv("BONZAI_URL"),
+        custom_llm_provider="openai"
+    )
+
     cms_config = {
         "base_url": os.getenv("CONTENTSTACK_URL"),
         "api_key": os.getenv("CONTENTSTACK_API_KEY"),
@@ -25,9 +33,9 @@ def initialize_config():
         "environment": os.getenv("CONTENTSTACK_ENVIRONMENT")
     }
 
-    config_variables = {"llm": llm, "cms": cms_config}
-    print("Connected CMS: " + cms_config["base_url"])
-    print("Connected LLM: " + llm.model)
+    config_variables = {"llm": llm_config, "cms": cms_config}
+    print("Connected CMS: " + config_variables["cms"]["base_url"])
+    print("Connected LLM: " + config_variables["llm"].model)
 
     return config_variables
 
@@ -117,13 +125,18 @@ def personalize_page(state: AgentState):
 
     agent = create_react_agent(config["llm"], tools)
 
-    prompt = {
-            "messages": [("user", f"""Personalize the landing page by generating a personalized informational text. There are a few steps you have to follow:
+    '''Personalize the landing page by generating a personalized informational text. There are a few steps you have to follow:
             1. Find the landing page in the pages list and look at the second block contents and remember the uid of the page
             2. Generate a well-suited informational text based on the content of the second block and the user's interests
-            3. Use this uid together with your tools to change the information of the product in ContentStack.
+            3. Use this uid together with your tools to change the information of the product in ContentStack.'''
 
-            Information for you:
+    prompt = {
+            "messages": [("user", f"""Find the landing page in the pages list and look at the second block contents. Generate a new marketing text for it tailored to the user's interests.
+            Give your response like this:
+            Found content: <The content you saw in the second block of the landing page>
+            Personalized marketing text: <Your new marketing text>
+
+            Information you can use:
             User interests: The user works at a construction company. 
             Pages list: {state['pages_list']}
             """)]}
