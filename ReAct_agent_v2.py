@@ -11,10 +11,11 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
 import os
 import requests
+from pymongo import MongoClient
+import json
 
 
-
-# region Initialization of LLM and CMS
+# region Initialization
 def initialize_config():
     load_dotenv()
 
@@ -33,24 +34,28 @@ def initialize_config():
         "environment": os.getenv("CONTENTSTACK_ENVIRONMENT")
     }
 
-    config_variables = {"llm": llm_config, "cms": cms_config}
+    db_config = {
+        "client": MongoClient(os.getenv("MONGODB_URL")),
+        "db_name": os.getenv("MONGODB_DATABASE")
+    }
+
+    config_variables = {"llm": llm_config, "cms": cms_config, "db": db_config}
+
     print("Connected CMS: " + config_variables["cms"]["base_url"])
     print("Connected LLM: " + config_variables["llm"].model)
 
+    try:
+        config_variables["db"]["client"].admin.command('ping')
+        print("Connected DB: " + str(config_variables["db"]["client"]))
+    except Exception as e:
+        print(f"Couldn't connect to MongoDB: {e}")
+
     return config_variables
 
-
+config = initialize_config()
 # endregion
 
-# region Langgraph nodes
-class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    generated_content: str
-    pages_list: dict
-    content_type_uid: str
-    entry_to_customize: str
-    block_index_to_customize: int
-
+# region agentic tools
 @tool
 def personalize_informational_text(pageuid: str, generated_content: str):
     """Personalize the information of a product in ContentStack"""
@@ -90,10 +95,15 @@ def personalize_informational_text(pageuid: str, generated_content: str):
         return response
     except requests.exceptions.RequestException as e:
         return f"An error occured when updating pages: {str(e)}"
-
-# Create toollist and initialize LLM and CMS
 tools = [personalize_informational_text]
-config = initialize_config()
+# endregion
+
+# region Langgraph nodes
+class AgentState(TypedDict):
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    generated_page: str
+    page_list: dict
+    content_type_uid: str
 
 def retrieve_pages_node(state: AgentState):
     """Retrieve all existing pages from ContentStack"""
@@ -108,63 +118,65 @@ def retrieve_pages_node(state: AgentState):
     }
 
     url = f"https://{config['cms']['base_url']}/v3/content_types/{state['content_type_uid']}/entries"
-    print("Received pages from " + url + f" in stack {config['cms']['api_key']}.")
+
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         page_list = response.json()
 
-        state['pages_list'] = page_list
+        state['page_list'] = page_list
+        print("Retrieved pages from CMS.")
         return state
     except requests.exceptions.RequestException as e:
         return f"Error retrieving pages: {str(e)}"
 
 
-def personalize_page(state: AgentState):
+def personalize_page_node(state: AgentState):
     """Personalize a page"""
-
-    agent = create_react_agent(config["llm"], tools)
-
-    '''Personalize the landing page by generating a personalized informational text. There are a few steps you have to follow:
-            1. Find the landing page in the pages list and look at the second block contents and remember the uid of the page
-            2. Generate a well-suited informational text based on the content of the second block and the user's interests
-            3. Use this uid together with your tools to change the information of the product in ContentStack.'''
+    agent = create_react_agent(config["llm"], [])
 
     prompt = {
-            "messages": [("user", f"""Find the landing page in the pages list and look at the second block contents. Generate a new marketing text for it tailored to the user's interests.
-            Give your response like this:
-            Found content: <The content you saw in the second block of the landing page>
-            Personalized marketing text: <Your new marketing text>
+            "messages": [("user", f"""Find the landing page in the pages list and look at the second block contents. Generate a new marketing text for it, tailored to the user's interests.
+            It is very important to keep in mind that you may not twist the meaning of the content, it should be a text that is more tailored to the user's interests, but it should still advertise the same product the content states.
+            Use the text to generate a new page object by using the page from the pages list as a template and filling in the new content. Make sure that you do not change or add anything besides the personalized text.
+            Give only the generated object as an answer, nothing else.
 
             Information you can use:
             User interests: The user works at a construction company. 
-            Pages list: {state['pages_list']}
+            Pages list: {state['page_list']}
             """)]}
 
-    # Generate informational text with agent
+    # Generate marketing text with agent
     try:
         result = agent.invoke(prompt)
+        response = result['messages'][-1].content
 
-        print(result)
-        state["generated_content"] = result
+        # Create json object from the response
+        try:
+            generated_object = response.replace('```json', '').replace('```', '').strip()
+            generated_page = json.loads(generated_object)
+            print("Personalized a page: " + str(generated_page))
+        except Exception as e:
+            return f"Agent response could not be pocessed: {str(e)}. Agent response: {generated_page}"
 
-        return state
-    except requests.exceptions.RequestException as e:
-        return f"An error occured when generating the informational text: {str(e)}"
+    except Exception as e:
+        return f"An error occured when generating content: {str(e)}"
 
-    # TODO: dynamically personalize components:
-    # personalize header tailored to industry/interests
-    # personalize informational text tailored to industry/interests
-    # personalize recommendations (what page most relevant for person) --> Example Bibby: Construction worker should have construction as first option.
+    # Save generated page
+    state['generated_page'] = generated_page
 
+    database = config["db"]["client"][config["db"]["db_name"]]
+    collection = database['pages']
 
-
+    result = collection.insert_one(generated_page)
+    print(f"Saved personalized page in database with ID: {result.inserted_id}")
+    return state
 # endregion
 
 # Create graph
 graph = StateGraph(AgentState)
 graph.add_node("RetrievePages", retrieve_pages_node)
-graph.add_node("personalizePage", personalize_page)
+graph.add_node("personalizePage", personalize_page_node)
 graph.add_edge(START, "RetrievePages")
 graph.add_edge("RetrievePages", "personalizePage")
 graph.add_edge("personalizePage", END)
@@ -173,7 +185,7 @@ retrievalAgent = graph.compile()
 
 # Run agent
 result = retrievalAgent.invoke({"content_type_uid": "page"})
-print(result["pages_list"])
+print(result["page_list"])
 
 
 
