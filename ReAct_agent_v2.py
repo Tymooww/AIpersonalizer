@@ -114,7 +114,8 @@ def retrieve_pages_node(state: AgentState):
     }
 
     params = {
-        "environment": config["cms"]["environment"]
+        "environment": config["cms"]["environment"],
+        "include[]": "header_reference"
     }
 
     url = f"https://{config['cms']['base_url']}/v3/content_types/{state['content_type_uid']}/entries"
@@ -136,12 +137,12 @@ def personalize_page_node(state: AgentState):
     agent = create_react_agent(config["llm"], [])
 
     prompt = {
-            "messages": [("user", f"""Find the landing page in the pages list and look at the second block contents. Generate a new marketing text for it, tailored to the user's interests.
-            It is very important to keep in mind that you may not twist the meaning of the content, it should be a text that is more tailored to the user's interests, but it should still advertise the same product the content states.
-            Use the text to generate a new page object by using the page from the pages list as a template and filling in the new content. Make sure that you do not change or add anything besides the personalized text.
+            "messages": [("user", f"""Find the our-services page in the pages list and look at the block contents. Generate a new marketing text for it, based on the content that is currently in there, and it should be tailored to the user's interests. 
+            It is very important to keep in mind that you may not twist the meaning of the content, while it should be a text that shows how the product can fit in the user's interests, it should still advertise the product the content states.
+            Use your updated text to generate a new page object using the page from the page list as a template and filling in the updated content. Make sure that you do not change or add anything besides the personalized text.
             Give only the generated object as an answer, nothing else.
 
-            Information you can use:
+            Information you can user:
             User interests: The user works at a construction company. 
             Pages list: {state['page_list']}
             """)]}
