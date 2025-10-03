@@ -56,47 +56,55 @@ config = initialize_config()
 
 # region agentic tools
 @tool
-def personalize_informational_text(pageuid: str, generated_content: str):
-    """Personalize the information of a product in ContentStack"""
-    print("Informational text personalization result: " + result)
+def personalize_marketing_text(generic_blocks:str, customer_background:str) -> str:
+    """Personalize marketing text based on generic content and customer background."""
+    print("Generating personalized text for block(s)...")
+    personalized_blocks = config["llm"].invoke(f"""Generate a new marketing text for the provided generic blocks, based on the content that is currently in there, by tailoring it to the customer's background. 
+            It is very important to keep in mind that you may not twist the meaning of the content. While it should be a text that shows how the product can fit in the customer's interests, it should still advertise the product the content states.
+            Use the received block(s) as a formatting structure and return new block(s) with the generated text. Make sure that you do not change or add anything besides the personalized text. 
+            Give only the generated object as a response, nothing else.
+            
+            Information you can use:
+            Generic blocks: {generic_blocks}
+            customer_background: {customer_background}""")
 
-    # state['block_index_to_customize'] = 0 # Set block index to two (second block will be edited)
-
-    headers = {
-        "api_key": config["cms"]["api_key"],
-        "authorization": config["cms"]["management_token"],
-        "Content-Type": "application/json"
-    }
-
-    body = {
-        "entry": {
-            "blocks": {
-                "UPDATE": {
-                    "index": 0,
-                    "data": {
-                        "block": {
-                            "copy": {generated_content},
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    url = f"https://{config['cms']['base_url']}/v3/content_types/page/entries/{pageuid}"
-    print("Personalized content at " + url + f" in stack {config['cms']['api_key']}.")
-
-    try:
-        response = requests.put(url, headers=headers, json=body)
-        response.raise_for_status()
-        response = response.json()
-
-        return response
-    except requests.exceptions.RequestException as e:
-        return f"An error occured when updating pages: {str(e)}"
+    # TODO: Update generated page somehow
+    return str(personalized_blocks)
 
 
-tools = [personalize_informational_text]
+@tool
+def personalize_hero_image(generic_blocks: str, customer_background: str) -> str:
+    """Personalize the hero image of a page based on the customer background."""
+    # TODO: Implement personalizing the hero image
+    '''print("Generating personalized text for block(s)...")
+    personalized_blocks = config["llm"].invoke(f"""Generate a new marketing text for the provided generic blocks, based on the content that is currently in there, by tailoring it to the customer's background. 
+            It is very important to keep in mind that you may not twist the meaning of the content. While it should be a text that shows how the product can fit in the customer's interests, it should still advertise the product the content states.
+            Use the received block(s) as a formatting structure and return new block(s) with the generated text. Make sure that you do not change or add anything besides the personalized text. 
+            Give only the generated object as a response, nothing else.
+
+            Information you can use:
+            Generic blocks: {generic_blocks}
+            customer_background: {customer_background}""")'''
+
+    return
+
+tool
+def personalize_element_order(generic_blocks: str, customer_background: str) -> str:
+    """Personalize the order of elements of a page, based on the customer background."""
+    # TODO: Implement personalizing the order of elements
+    '''print("Generating personalized text for block(s)...")
+    personalized_blocks = config["llm"].invoke(f"""Generate a new marketing text for the provided generic blocks, based on the content that is currently in there, by tailoring it to the customer's background. 
+            It is very important to keep in mind that you may not twist the meaning of the content. While it should be a text that shows how the product can fit in the customer's interests, it should still advertise the product the content states.
+            Use the received block(s) as a formatting structure and return new block(s) with the generated text. Make sure that you do not change or add anything besides the personalized text. 
+            Give only the generated object as a response, nothing else.
+
+            Information you can use:
+            Generic blocks: {generic_blocks}
+            customer_background: {customer_background}""")'''
+
+    return
+
+tools = [personalize_marketing_text, personalize_hero_image, personalize_element_order]
 
 
 # endregion
@@ -137,23 +145,24 @@ def retrieve_pages_node(state: AgentState):
 
 def personalize_page_node(state: AgentState):
     """Personalize a page"""
-    agent = create_react_agent(config["llm"], [])
+    personalizer_agent = create_react_agent(config["llm"], tools)
 
     prompt = {
-        "messages": [("user", f"""Find the our-services page in the pages list and look at the block contents. Generate a new marketing text for it, based on the content that is currently in there, and it should be tailored to the user's interests. 
-            It is very important to keep in mind that you may not twist the meaning of the content, while it should be a text that shows how the product can fit in the user's interests, it should still advertise the product the content states.
-            Use your updated text to generate a new page object using the page from the page list as a template and filling in the updated content. Make sure that you do not change or add anything besides the personalized text.
-            Give only the generated object as an answer, nothing else.
+        "messages": [("user", f"""Personalize the our services page with personalized marketing text by sending it the blocks of the page. 
+        Use the personalized blocks you will receive to generate a new page object using the page from the page list as a template and filling in the updated content. 
+        Make sure that you do not change or add anything besides the personalized text. Give only the generated object as an answer, nothing else.
 
-            Information you can user:
-            User interests: The user works at a construction company. 
-            Pages list: {state['page_list']}
+            Information you can use:
+            Customer interests: The user works at a construction company. 
+            Page list: {state['page_list']}
             """)]}
 
     # Generate marketing text with agent
     try:
-        result = agent.invoke(prompt)
-        response = result['messages'][-1].content
+        print("Personalizer agent starts personalizing...")
+        response = personalizer_agent.invoke(prompt)
+        response = response['messages'][-1].content
+        print("Personalizer agent personalized a page.")
 
         # Create json object from the response
         try:
