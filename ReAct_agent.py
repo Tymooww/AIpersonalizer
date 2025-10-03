@@ -1,20 +1,13 @@
-''' This agent retrieves all pages (with uid 'page') from ContentStack '''
-from typing import Annotated, Sequence, TypedDict
+"""This agent retrieves all pages (with uid 'page') from ContentStack."""
+from typing import TypedDict
 from dotenv import load_dotenv
-from langchain_core.messages import BaseMessage
-from langchain_core.messages import ToolMessage
-from langchain_core.messages import SystemMessage
-from langchain_core.tools import tool
-from langchain_ollama import ChatOllama
-from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import create_react_agent
+from langgraph.graph import StateGraph
 import os
 import requests
 
 
-#region Initialization of LLM and CMS
+# region Initialization of LLM and CMS
 def initialize_config():
-    llm = ChatOllama(base_url='http://localhost:11434', model="mistral")
     load_dotenv()
     cms_config = {
         "base_url": os.getenv("CONTENTSTACK_URL"),
@@ -24,20 +17,22 @@ def initialize_config():
         "environment": os.getenv("CONTENTSTACK_ENVIRONMENT")
     }
 
-    config_variables = {"llm": llm, "cms": cms_config}
+    config_variables = {"cms": cms_config}
     print("Connected CMS: " + cms_config["base_url"])
-    print("Connected LLM: " + llm.model)
 
     return config_variables
-#endregion
 
-#region Langgraph nodes
+
+# endregion
+
+# region Langgraph nodes
 class AgentState(TypedDict):
     messages: list
     pages_list: dict
     content_type_uid: str
     entry_to_customize: str
     block_index_to_customize: int
+
 
 def retrieve_pages_node(state: AgentState):
     """Retrieve all existing pages from ContentStack"""
@@ -62,7 +57,9 @@ def retrieve_pages_node(state: AgentState):
         return state
     except requests.exceptions.RequestException as e:
         return f"Error retrieving pages: {str(e)}"
-#endregion
+
+
+# endregion
 
 # Initialize LLM and CMS
 config = initialize_config()
@@ -73,18 +70,8 @@ graph.add_node("RetrievePages", retrieve_pages_node)
 graph.set_entry_point("RetrievePages")
 graph.set_finish_point("RetrievePages")
 
-
 retrievalAgent = graph.compile()
 
 # Run agent
 result = retrievalAgent.invoke({"content_type_uid": "page"})
 print(result["pages_list"])
-
-
-
-
-
-
-
-
-

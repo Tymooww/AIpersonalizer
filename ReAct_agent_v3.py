@@ -1,6 +1,7 @@
-"""This agent retrieves all pages (with uid 'page') from ContentStack and personalizes these pages."""
+"""This agent retrieves all pages (with uid 'page') from ContentStack and personalizes them using tools."""
 from typing import TypedDict
 from dotenv import load_dotenv
+from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
@@ -49,6 +50,53 @@ def initialize_config():
 
 
 config = initialize_config()
+
+
+# endregion
+
+# region agentic tools
+@tool
+def personalize_informational_text(pageuid: str, generated_content: str):
+    """Personalize the information of a product in ContentStack"""
+    print("Informational text personalization result: " + result)
+
+    # state['block_index_to_customize'] = 0 # Set block index to two (second block will be edited)
+
+    headers = {
+        "api_key": config["cms"]["api_key"],
+        "authorization": config["cms"]["management_token"],
+        "Content-Type": "application/json"
+    }
+
+    body = {
+        "entry": {
+            "blocks": {
+                "UPDATE": {
+                    "index": 0,
+                    "data": {
+                        "block": {
+                            "copy": {generated_content},
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    url = f"https://{config['cms']['base_url']}/v3/content_types/page/entries/{pageuid}"
+    print("Personalized content at " + url + f" in stack {config['cms']['api_key']}.")
+
+    try:
+        response = requests.put(url, headers=headers, json=body)
+        response.raise_for_status()
+        response = response.json()
+
+        return response
+    except requests.exceptions.RequestException as e:
+        return f"An error occured when updating pages: {str(e)}"
+
+
+tools = [personalize_informational_text]
 
 
 # endregion

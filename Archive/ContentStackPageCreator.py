@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 from dotenv import load_dotenv
 import os
 
+
 def initialize():
     chosen_llm = ChatOllama(base_url='http://localhost:11434', model="mistral")
     load_dotenv()
@@ -21,6 +22,7 @@ def initialize():
     print("Connected CMS: " + cms_config["base_url"])
     print("Connected LLM: " + chosen_llm.model)
     return config
+
 
 @tool
 def retrieve_pages(content_type_uid: str) -> list:
@@ -40,11 +42,12 @@ def retrieve_pages(content_type_uid: str) -> list:
 
     try:
         response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()  # Raises an HTTPError for bad responses
+        response.raise_for_status()
         page_list = response.json()
         return page_list
     except requests.exceptions.RequestException as e:
         return f"Error retrieving pages: {str(e)}"
+
 
 @tool
 def customize_landing_page():
@@ -52,17 +55,18 @@ def customize_landing_page():
     # POST request for editing landing page
     return None
 
+
 @tool
 def customize_standard_page():
     """Customize page."""
     # POST request for editing page
     return None
 
+
 config_variables = initialize()
 agent = create_react_agent(model=config_variables["llm"], tools=[retrieve_pages])
-result = agent.invoke({"messages": [("user", "Give me the pages stored in ContentStack. You can do this using the content_type_uid what is 'page'. Answer with the full list, nothing more.")]})
+result = agent.invoke({"messages": [("user",
+                                     "Give me the pages stored in ContentStack. You can do this using the content_type_uid what is 'page'. Answer with the full list, nothing more.")]})
 
-# Extraheer de data uit het agent resultaat
 pages_data = result["messages"][-1].content
-print("Data voor je chain:")
 print(pages_data)
