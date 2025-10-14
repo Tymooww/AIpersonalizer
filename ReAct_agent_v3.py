@@ -1,14 +1,10 @@
 """This agent retrieves all pages (with uid 'page') from ContentStack and personalizes them using tools."""
-from typing import Annotated, Sequence, TypedDict
+from typing import TypedDict
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import BaseMessage
-from langchain_core.messages import ToolMessage
-from langchain_core.messages import SystemMessage
-from langgraph.graph.message import add_messages
 import os
 import requests
 from pymongo import MongoClient
@@ -112,7 +108,6 @@ tools = [personalize_texts, personalize_images, personalize_element_order]
 
 # region Langgraph nodes
 class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
     page_list: dict
     asset_list: dict
     content_type_uid: str
