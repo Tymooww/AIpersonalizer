@@ -1,4 +1,4 @@
-"""This agent personalizes ContentStack pages by personalizing text and choosing the best fitting image for a page."""
+"""This agent personalizes ContentStack pages by personalizing text, choosing the best fitting image and reordering blocks (if necessary) for a page."""
 from typing import TypedDict
 from dotenv import load_dotenv
 from langchain_litellm import ChatLiteLLM
@@ -57,6 +57,8 @@ class AgentState(TypedDict):
     generic_page: dict
     personalized_page: dict
     personalization_queue: list
+    is_retry_step: bool
+
 
 def fetch_data_node(state: AgentState):
     """Retrieve all pages and assets from ContentStack."""
@@ -87,11 +89,12 @@ def fetch_data_node(state: AgentState):
         return f"An error occurred while retrieving pages: {str(e)}"
 
     # Setup personalization queue and extract page to personalize
-    state["personalization_queue"] = ["text", "image", "save"] # TODO: This will be replaced by an agent deciding the steps to execute
+    state["personalization_queue"] = ["text", "image", "order", "save"] # TODO: This will be replaced by an agent deciding the steps to execute
 
     # Extract the page to customize
-    state["generic_page"] = state["page_list"]["entries"][2]  # TODO: This will be replaced by an agent deciding what pages to personalize
-    state["personalized_page"] = state["page_list"]["entries"][2] # TODO: This will be replaced by an agent deciding what pages to personalize
+    state["generic_page"] = state["page_list"]["entries"][0]  # TODO: This will be replaced by an agent deciding what pages to personalize
+    state["personalized_page"] = state["page_list"]["entries"][0] # TODO: This will be replaced by an agent deciding what pages to personalize
+    state["is_retry_step"] = False
 
     # Retrieve assets from ContentStack
     try:
@@ -108,10 +111,10 @@ def fetch_data_node(state: AgentState):
 
 def personalization_router_node (state:AgentState):
     """Router node for logging."""
-    if len(state["personalization_queue"]) > 0:
+    if len(state["personalization_queue"]) > 1:
         print(f"Next step: {state['personalization_queue'][0]}")
     else:
-        print("Personalization process is finished")
+        print("Page has been personalized successfully")
 
     return state
 
@@ -123,47 +126,80 @@ def determine_next_step (state: AgentState):
                 return "p_texts"
             case "image":
                 return "p_images"
+            case "order":
+                return "p_order"
             case "save":
                 return "save"
+
     else:
         return "end"
 
 def personalize_texts_node (state:AgentState):
     """Personalize text(s): generate a tailored text based on the content of the generic page and the customer's background."""
-    # Remove step from queue
-    state["personalization_queue"].pop(0)
     print("Personalizing text...")
 
     # Define output structure
     class GeneratedText(BaseModel):
-        generated_text: str = Field(description="The generated marketing text.")
-        why_better: str = Field(description="The reason why this text is better.")
+        title: str = Field(description="The generated title.")
+        copytext: str = Field(description="The generated copy text.")
+        explanation: str = Field(description="The reason why this text is better.")
 
-    # Generate personalized text
+    # Generate personalized texts for block
     try:
-        generated_text = config["llm"].with_structured_output(GeneratedText).invoke(f"""Generate a new marketing text in HTML for the provided generic page by tailoring it to the customer's background, based on the content that is currently in there. 
-                It is very important to keep in mind that you may not twist the meaning of the content. While it should be a text that shows how the product can fit in the customer's background, it should still advertise the product the content states.
-                Return only the new marketing text and the reason why the text is better, nothing else.
+        generated_titles = []
+        generated_copy_texts = []
 
-                Information you can use:
-                Generic page: {state['generic_page']}
-                Customer information: customer works in the construction industry.""")
+        for block in state["generic_page"]["blocks"]:
+            generated_text = config["llm"].with_structured_output(GeneratedText).invoke(f"""
+                    You are an expert in personalized marketing.
+                    Your task: use "Customer information" to personalize the copytext and title of "Block to personalize". 
+                    Important: 
+                    1. Don't personalize too much, you never know if a CDP has perfect information about the customer. 
+                    2. Use the customer information to show the customer what challenges or needs the product can help with, but don't use terms from the industry or terms like tailored in the texts or titles.  
+                    3. Ensure that the original meaning of the content is preserved, sell the stated products, don't invent new products or product variations.
+                    4. Maintain a professional tone.  
+                    5. Only use the provided facts and improve the wording, do not hallucinate or assume things about the customer or products or reinvent what is written in the "Block to personalize"..
+                    6. Write the copy in HTML.
+                    
+                    Please provide as your answer:
+                    1. Title: the personalized title
+                    2. Copytext: the personalized copytext
+                    3. A brief explanation of why you created the new title and copytext, focused on the main improvements.
 
-        print("Personalized text: " + str(generated_text.why_better))
+                    Information you can use:
+                    Block to personalize: {block}.
+                    Customer information: Industry: IT Cloud computing.
+            """)
+
+            generated_titles.append(generated_text.title)
+            generated_copy_texts.append(generated_text.copytext)
+
+            print("Personalized text: " + str(generated_text))
 
         # Update the copy of the page to the generated text
-        state["personalized_page"]["blocks"][0]["block"]["copy"] = generated_text.generated_text
+        for block_id, _ in enumerate(state["generic_page"]["blocks"]):
+            state["personalized_page"]["blocks"][block_id]["block"]["copy"] = generated_copy_texts[block_id]
+            state["personalized_page"]["blocks"][block_id]["block"]["title"] = generated_titles[block_id]
+
+        # Remove step from personalization queue
+        state["personalization_queue"].pop(0)
+        state["is_retry_step"] = False
         return state
 
     except Exception as e:
-        print(f"An error occurred when personalizing the text of a page: {str(e)}")
-        state["personalized_page"] = {"Error" : str(e)}
+        if state["is_retry_step"]:
+            state["personalization_queue"] = []
+            print(f"An error occurred when personalizing the text of a page: {str(e)}")
+            state["personalized_page"] = {"Error": str(e)}
+        else:
+            print(f"An error occurred when personalizing the text of a page, trying again. Error message: {str(e)}")
+            state["is_retry_step"] = True
         return state
+
+
 
 def personalize_images_node (state:AgentState):
     """Personalize image(s): choose the best fitting image for the content of the page and the customer's background."""
-    # Remove step from queue
-    state["personalization_queue"].pop(0)
     print("Personalizing image...")
 
     # Strip assets information to essential data for LLM
@@ -174,45 +210,146 @@ def personalize_images_node (state:AgentState):
 
     # Define output structure
     class Image(BaseModel):
-        title: str = Field(description="The title of the chosen image.")
-        choice_reason: str = Field(description="The reason why you chose the image.")
+        titles: list = Field(description="The list with the titles of the chosen images.")
+        block_uids: list = Field(description="The list with the UIDs of the blocks where the chosen images should be put.")
+        explanation: str = Field(description="The explanation of why you chose these images and why you placed them in the blocks you chose.")
 
     try:
-        chosen_image = config["llm"].with_structured_output(Image).invoke(f"""Personalize the image of the provided page by choosing the best fitting image from the image list. 
-                The image should match the context of the page and the customer's background. To do this, analyze the tags, title, filename and description for each image and choose the best fitting image based on the criteria defined above. 
-                It is very important that the image always fits the context of the page, if you can't find an image that suits both the customer's background and the content of the page, then choose an image that suits the context best. 
-                Return only the name of the chosen image and the reason why you chose it, nothing else. Make sure that you use the exact name of the chosen image, check that your chosen title is in the image list.
-                
+        response = config["llm"].with_structured_output(Image).invoke(f"""
+                You are an expert in personalized marketing.
+                Your task: use "Customer information" and "Image list" to find the best fitting image(s) for the blocks in "Block list". 
+                Important: 
+                1. Analyze all images in "Image list" to find fitting images.
+                2. You can analyze images by looking at their title, filename, description and tags.
+                3. The image you choose must fit the title and/or copy of the block, if possible it should also fit with the customer's interests.
+                4. It is mandatory to have at least one block with an image, more blocks with an image are allowed.
+                5. A block can only have one image.
+                6. Every image needs to have a block to be displayed in, so there should be as many block UIDs as titles
+                7. You can find the UID of a block in _metadata.
+                8. Make sure that your chosen title(s) exist in "Image list", don't invent new titles but copy them over.
+                9. Make sure that your chosen UID(s) exist in "Block list", don't invent new UIDs but copy them over.
+                    
+                Please provide as your answer:
+                1. Title: this title is from the image you want to place.
+                2. Block UID: this UID is from the block you want to place the image.
+                3. A brief explanation of why you chose these images and why you placed them in the blocks you chose, focused on the main improvements.
+
                 Information you can use:
-                Generic page: {state['generic_page']}
+                Block list: {state['generic_page']["blocks"]}.
                 Image list: {stripped_asset_list}
-                Customer information: customer works in the construction industry.""")
+                Customer information: Industry: IT Cloud computing.
+        """)
 
-        print("Personalized image: " + str(chosen_image))
+        print("Personalized image: " + str(response))
 
-        # Retrieve details of chosen image
-        chosen_image_details = None
-        for image in state["asset_list"]["assets"]:
-            if image["title"] == chosen_image.title:
-                chosen_image_details = image
+        # Retrieve details of chosen image(s)
+        image_details = []
+        for title in response.titles:
+            for image in state["asset_list"]["assets"]:
+                if image["title"] == title:
+                    image_details.append(image)
+                    break
 
-        # Update the image of the page to the chosen image
-        if chosen_image_details is not None:
-            state["personalized_page"]["blocks"][0]["block"]["image"] = chosen_image_details
+        # Retrieve details of chosen block(s)
+        block_details = []
+        for uid in response.block_uids:
+            for block in state["generic_page"]["blocks"]:
+                if block["block"]["_metadata"]["uid"] == uid:
+                    block_details.append(block)
+                    break
+
+        # Update chosen blocks with new images
+        if len(block_details) != 0:
+            for index, block in enumerate(block_details):
+                block["block"]["image"] = image_details[index]
         else:
-            print(f"An error occurred when personalizing the image of a page: The chosen image does not exist: {chosen_image.title}")
-            state["personalized_page"] = {"Error" : f"Error: chosen image does not exist ({chosen_image.title})"}
+            if state["is_retry_step"]:
+                state["personalization_queue"] = []
+                print(f"An error occurred when personalizing the image of a page: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids})do not exist.")
+                state["personalized_page"] = {"Error": f"Error: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist."}
+            else:
+                print(f"One or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist, trying again.")
+                state["is_retry_step"] = True
+            return state
+
+        # Remove step from personalization queue
+        state["personalization_queue"].pop(0)
+        state["is_retry_step"] = False
         return state
 
     except Exception as e:
-        print(f"An error occurred when personalizing the image of a page: {str(e)}")
-        state["personalized_page"] = {"Error" : str(e)}
+        if state["is_retry_step"]:
+            state["personalization_queue"] = []
+            print(f"An error occurred when personalizing the image of a page: {str(e)}")
+            state["personalized_page"] = {"Error": str(e)}
+        else:
+            print(f"An error occurred when personalizing the image of a page, trying again. Error message: {str(e)}")
+            state["is_retry_step"] = True
+        return state
+
+def personalize_element_order_node (state:AgentState):
+    """Change the order of blocks on a page: change the blocks based on the content of the generic page and the customer's background."""
+    print("Personalizing order of elements...")
+
+    # Define output structure
+    class GeneratedOrder(BaseModel):
+        block_order: list = Field(description="The order of the blocks by page uid.")
+        explanation: str = Field(description="The reason why this order is better.")
+
+    # Generate personalized text
+    try:
+        response = config["llm"].with_structured_output(GeneratedOrder).invoke(f"""
+                You are an expert in personalized marketing.
+                Your task: use "Customer information" and "Block list" to create a personalized order for the blocks of the provided page.
+                Important: 
+                1. Use "Customer information" to decide what blocks are the most relevant for the customer.
+                2. Place the most relevant blocks first in the order.
+                3. The first block always needs to be first.
+                4. All blocks need to be in the list, so the amount of blocks in the Block list should be the same as the amount of UIDs given in the answer.
+                5. The new order may NEVER conflict with the natural flow between the blocks, so make sure that when reading the blocks in your new order it feels like a natural flow of text.
+                6. You are not allowed to change the text in the blocks.
+                7. Make sure that your the UIDs of the blocks do exist in "Block list".
+                8. You can find the UID of a block in _metadata.
+                    
+                Please provide as your answer:
+                1. Block order: consisting of the UIDs of the blocks
+                2. A brief explanation of why you chose this order, focused on the main improvements.
+
+                Information you can use:
+                Block list: {state['generic_page']["blocks"]}.
+                Customer information: Industry: IT Cloud computing.
+        """)
+
+        print("Personalized order: " + str(response))
+
+        # Update the block order of the page to the generated order
+        current_block_list = state["personalized_page"]["blocks"]
+        updated_block_list = []
+        for uid in response.block_order:
+            for block in current_block_list:
+                if block["block"]["_metadata"]["uid"] == uid:
+                    updated_block_list.append(block)
+                    break
+
+        state["personalized_page"]["blocks"] = updated_block_list
+
+        # Remove step from personalization queue
+        state["personalization_queue"].pop(0)
+        state["is_retry_step"] = False
+        return state
+
+    except Exception as e:
+        if state["is_retry_step"]:
+            print(f"An error occurred when personalizing the order of the elements of a page: {str(e)}")
+            state["personalized_page"] = {"Error": str(e)}
+            state["personalization_queue"] = []
+        else:
+            print(f"An error occurred when personalizing the order of the elements of a page, trying again. Error message: {str(e)}")
+            state["is_retry_step"] = True
         return state
 
 def save_personalized_page_node (state:AgentState):
     """Save the personalized page in the database."""
-    # Remove step from queue
-    state["personalization_queue"].pop(0)
     print("Saving personalized page...")
 
     # Prepare database connection
@@ -222,25 +359,29 @@ def save_personalized_page_node (state:AgentState):
     try:
         generated_page = state["personalized_page"]
 
-        # Check if an error occurred during the personalization process
-        if "Error" in generated_page:
-            print(f"Page not saved in database, because of an error during personalization: {generated_page}")
-            return state
-
         # Save personalized page in the database
         if collection.count_documents({'title': generated_page["title"]}) == 0:
             response = collection.insert_one(generated_page)
-            print(f"Saved personalized page in database with ID: {response.inserted_id}")
+            print(f"successfully saved personalized page in database with ID: {response.inserted_id}")
         else:
             # Replace the page if it already exists
             response = collection.replace_one(
                 {'title': generated_page['title']},
                 generated_page
             )
-            print(f"Updated personalized page in database")
+            print(f"successfully updated existing personalized page in database")
+
+        # Remove step from personalization queue
+        state["personalization_queue"].pop(0)
+        return state
 
     except Exception as e:
-        print(f"An error occurred while saving the personalized page: {str(e)}")
+        if state["is_retry_step"]:
+            print(f"An error occurred while saving the personalized page in the database: {str(e)}")
+            state["personalization_queue"] = []
+        else:
+            print(f"An error occurred while saving the personalized page in the database, trying again. Error message: {str(e)}")
+            state["is_retry_step"] = True
         return state
 # endregion
 
@@ -249,6 +390,7 @@ graph = StateGraph(AgentState)
 graph.add_node("FetchData", fetch_data_node)
 graph.add_node("PersTexts", personalize_texts_node)
 graph.add_node("PersImages", personalize_images_node)
+graph.add_node("PersElmtOrder", personalize_element_order_node)
 graph.add_node("Router", personalization_router_node)
 graph.add_node("SavePersPage", save_personalized_page_node)
 
@@ -260,12 +402,14 @@ graph.add_conditional_edges(
     {
         "p_texts": "PersTexts",
         "p_images": "PersImages",
+        "p_order": "PersElmtOrder",
         "save": "SavePersPage",
         "end": END
     }
 )
 graph.add_edge("PersTexts", "Router")
 graph.add_edge("PersImages", "Router")
+graph.add_edge("PersElmtOrder", "Router")
 graph.add_edge("SavePersPage", END)
 personalizationAgent = graph.compile()
 
