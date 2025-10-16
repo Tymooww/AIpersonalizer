@@ -16,7 +16,8 @@ def initialize_config():
     llm_config = ChatLiteLLM(
         model=os.getenv("BONZAI_MODEL"),
         api_key=os.getenv("BONZAI_API_KEY"),
-        api_base=os.getenv("BONZAI_URL")
+        api_base=os.getenv("BONZAI_URL"),
+        temperature = 0.4
     )
 
     cms_config = {
@@ -52,9 +53,9 @@ config = initialize_config()
 # region Langgraph nodes
 class AgentState(TypedDict):
     content_type_uid: str
+    customer_information : dict
     page_list: dict
     asset_list: dict
-    generic_page: dict
     personalized_page: dict
     personalization_queue: list
     is_retry_step: bool
@@ -77,6 +78,9 @@ def fetch_data_node(state: AgentState):
     retrieve_pages_url = f"https://{config['cms']['base_url']}/v3/content_types/{state['content_type_uid']}/entries"
     retrieve_assets_url = f"https://{config['cms']['base_url']}/v3/assets"
 
+    # Setup personalization queue and extract page to personalize
+    state["personalization_queue"] = ["text", "image", "order", "save"]  # TODO: This will be replaced by an agent deciding the steps to execute
+
     # Retrieve pages from ContentStack
     try:
         response = requests.get(retrieve_pages_url, headers=headers, params=params)
@@ -86,14 +90,15 @@ def fetch_data_node(state: AgentState):
         state["page_list"] = page_list
         print("Retrieved pages from CMS")
     except requests.exceptions.RequestException as e:
-        return f"An error occurred while retrieving pages: {str(e)}"
-
-    # Setup personalization queue and extract page to personalize
-    state["personalization_queue"] = ["text", "image", "order", "save"] # TODO: This will be replaced by an agent deciding the steps to execute
+        print(f"An error occurred while retrieving pages from CMS: {str(e)}")
+        state["personalization_queue"] = []
+        return state
 
     # Extract the page to customize
-    state["generic_page"] = state["page_list"]["entries"][0]  # TODO: This will be replaced by an agent deciding what pages to personalize
-    state["personalized_page"] = state["page_list"]["entries"][0] # TODO: This will be replaced by an agent deciding what pages to personalize
+    for page in state["page_list"]["entries"]:
+        if page["title"] == "Our services":
+            state["personalized_page"] = page # TODO: This will be replaced by an agent deciding what pages to personalize
+
     state["is_retry_step"] = False
 
     # Retrieve assets from ContentStack
@@ -107,7 +112,9 @@ def fetch_data_node(state: AgentState):
 
         return state
     except requests.exceptions.RequestException as e:
-        return f"An error occurred while retrieving assets from CMS: {str(e)}"
+        print(f"An error occurred while retrieving assets from CMS: {str(e)}")
+        state["personalization_queue"] = []
+        return state
 
 def personalization_router_node (state:AgentState):
     """Router node for logging."""
@@ -149,26 +156,51 @@ def personalize_texts_node (state:AgentState):
         generated_titles = []
         generated_copy_texts = []
 
-        for block in state["generic_page"]["blocks"]:
+        for block in state["personalized_page"]["blocks"]:
             generated_text = config["llm"].with_structured_output(GeneratedText).invoke(f"""
                     You are an expert in personalized marketing.
-                    Your task: use "Customer information" to personalize the copytext and title of "Block to personalize". 
-                    Important: 
-                    1. Don't personalize too much, you never know if a CDP has perfect information about the customer. 
-                    2. Use the customer information to show the customer what challenges or needs the product can help with, but don't use terms from the industry or terms like tailored in the texts or titles.  
-                    3. Ensure that the original meaning of the content is preserved, sell the stated products, don't invent new products or product variations.
-                    4. Maintain a professional tone.  
-                    5. Only use the provided facts and improve the wording, do not hallucinate or assume things about the customer or products or reinvent what is written in the "Block to personalize"..
-                    6. Write the copy in HTML.
-                    
-                    Please provide as your answer:
-                    1. Title: the personalized title
-                    2. Copytext: the personalized copytext
-                    3. A brief explanation of why you created the new title and copytext, focused on the main improvements.
 
-                    Information you can use:
-                    Block to personalize: {block}.
-                    Customer information: Industry: IT Cloud computing.
+                    Your task: Subtly adapt "Block to personalize" to resonate with someone in the {state['customer_information']['segment']} sector.
+
+                    CRITICAL RULES:
+                    1. DO NOT mention the industry name, words that are very obviously related to the industry (for agriculture cultivating for example), puns or use phrases like "tailored for", "designed for", "specialized in [industry]" and don't use the same or similar wordings in every block!
+                    2. DO personalize by:
+                    - Emphasizing relevant challenges specific to this industry
+                    - Highlighting services that solve their unique problems
+                    - Using examples and scenarios they recognize
+                    - Adjusting tone and focus to match their priorities
+   
+                    3. Example (use for reference, don't use explicitly):
+                    TOO EXPLICIT: "Investment management for IT professionals in the tech sector"
+                    TOO GENERIC: "Investment management for professionals"
+                    JUST RIGHT: "Investment management for professionals managing equity compensation and frequent career transitions"
+
+                    4. Stay conservative:
+                    - Only adjust emphasis, examples, and specific pain points
+                    - Never invent new products or services
+                    - Maintain the professional tone
+
+                    5. Content preservation:
+                    - Sell the SAME products/services mentioned in the original
+                    - Don't add features that weren't there
+                    - Improve clarity and relevance, not scope
+
+                    6. Output in HTML format
+
+                    INDUSTRY CONTEXT (use implicitly, DON'T mention explicitly):
+                    {state['customer_information']}
+
+                    ---
+
+                    Block to personalize: {block}
+                    Other blocks (for reference): {state['personalized_page']['blocks']}
+
+                    ---
+
+                    Provide:
+                    1. Title: The personalized title (no industry name!)
+                    2. Copytext: The personalized copy (HTML)
+                    3. Explanation: Why these changes resonate with this audience (max 2 sentences).
             """)
 
             generated_titles.append(generated_text.title)
@@ -177,7 +209,7 @@ def personalize_texts_node (state:AgentState):
             print("Personalized text: " + str(generated_text))
 
         # Update the copy of the page to the generated text
-        for block_id, _ in enumerate(state["generic_page"]["blocks"]):
+        for block_id, _ in enumerate(state["personalized_page"]["blocks"]):
             state["personalized_page"]["blocks"][block_id]["block"]["copy"] = generated_copy_texts[block_id]
             state["personalized_page"]["blocks"][block_id]["block"]["title"] = generated_titles[block_id]
 
@@ -221,13 +253,14 @@ def personalize_images_node (state:AgentState):
                 Important: 
                 1. Analyze all images in "Image list" to find fitting images.
                 2. You can analyze images by looking at their title, filename, description and tags.
-                3. The image you choose must fit the title and/or copy of the block, if possible it should also fit with the customer's interests.
-                4. It is mandatory to have at least one block with an image, more blocks with an image are allowed.
-                5. A block can only have one image.
-                6. Every image needs to have a block to be displayed in, so there should be as many block UIDs as titles
-                7. You can find the UID of a block in _metadata.
-                8. Make sure that your chosen title(s) exist in "Image list", don't invent new titles but copy them over.
-                9. Make sure that your chosen UID(s) exist in "Block list", don't invent new UIDs but copy them over.
+                3. The image you choose must fit the title and/or copy of the block and should also fit with the customer's interests.
+                4. Images already present in blocks can also be changed, but it is not mandatory
+                5. It is mandatory to have at least one block with an image, more blocks with an image are allowed.
+                6. A block can only have one image.
+                7. Every image needs to have a block to be displayed in, so there should be as many block UIDs as titles
+                8. You can find the UID of a block in _metadata.
+                9. Make sure that your chosen title(s) exist in "Image list", don't invent new titles but copy them over.
+                10. Make sure that your chosen UID(s) exist in "Block list", don't invent new UIDs but copy them over.
                     
                 Please provide as your answer:
                 1. Title: this title is from the image you want to place.
@@ -235,9 +268,9 @@ def personalize_images_node (state:AgentState):
                 3. A brief explanation of why you chose these images and why you placed them in the blocks you chose, focused on the main improvements.
 
                 Information you can use:
-                Block list: {state['generic_page']["blocks"]}.
+                Block list: {state['personalized_page']["blocks"]}.
                 Image list: {stripped_asset_list}
-                Customer information: Industry: IT Cloud computing.
+                Customer information: {state['customer_information']}.
         """)
 
         print("Personalized image: " + str(response))
@@ -253,7 +286,7 @@ def personalize_images_node (state:AgentState):
         # Retrieve details of chosen block(s)
         block_details = []
         for uid in response.block_uids:
-            for block in state["generic_page"]["blocks"]:
+            for block in state["personalized_page"]["blocks"]:
                 if block["block"]["_metadata"]["uid"] == uid:
                     block_details.append(block)
                     break
@@ -296,6 +329,11 @@ def personalize_element_order_node (state:AgentState):
         block_order: list = Field(description="The order of the blocks by page uid.")
         explanation: str = Field(description="The reason why this order is better.")
 
+    # Create stripped block list without the first element (first element should always be on top of page)
+    stripped_block_list = state["personalized_page"]["blocks"]
+    stripped_block = stripped_block_list[0]
+    del stripped_block_list[0]
+
     # Generate personalized text
     try:
         response = config["llm"].with_structured_output(GeneratedOrder).invoke(f"""
@@ -304,29 +342,28 @@ def personalize_element_order_node (state:AgentState):
                 Important: 
                 1. Use "Customer information" to decide what blocks are the most relevant for the customer.
                 2. Place the most relevant blocks first in the order.
-                3. The first block always needs to be first.
-                4. All blocks need to be in the list, so the amount of blocks in the Block list should be the same as the amount of UIDs given in the answer.
-                5. The new order may NEVER conflict with the natural flow between the blocks, so make sure that when reading the blocks in your new order it feels like a natural flow of text.
-                6. You are not allowed to change the text in the blocks.
-                7. Make sure that your the UIDs of the blocks do exist in "Block list".
-                8. You can find the UID of a block in _metadata.
+                3. All blocks need to be in the list, so the amount of blocks in the Block list should be the same as the amount of UIDs given in the answer.
+                4. The new order may NEVER conflict with the natural flow between the blocks, so make sure that when reading the blocks in your new order it feels like a natural flow of text.
+                5. You are not allowed to change the text in the blocks.
+                6. Make sure that your the UIDs of the blocks do exist in "Block list".
+                7. You can find the UID of a block in _metadata.
                     
                 Please provide as your answer:
                 1. Block order: consisting of the UIDs of the blocks
                 2. A brief explanation of why you chose this order, focused on the main improvements.
 
                 Information you can use:
-                Block list: {state['generic_page']["blocks"]}.
-                Customer information: Industry: IT Cloud computing.
+                Block list: {stripped_block_list}.
+                Customer information: {state['customer_information']}.
         """)
 
         print("Personalized order: " + str(response))
 
         # Update the block order of the page to the generated order
-        current_block_list = state["personalized_page"]["blocks"]
-        updated_block_list = []
+        updated_block_list = [stripped_block]
+
         for uid in response.block_order:
-            for block in current_block_list:
+            for block in stripped_block_list:
                 if block["block"]["_metadata"]["uid"] == uid:
                     updated_block_list.append(block)
                     break
@@ -414,5 +451,5 @@ graph.add_edge("SavePersPage", END)
 personalizationAgent = graph.compile()
 
 # Run agent
-result = personalizationAgent.invoke({"content_type_uid": "page"})
+result = personalizationAgent.invoke({"content_type_uid": "page", "customer_information": {"segment": "Construction", "Company_Size": "50-200", "Geographic_Region": "Netherlands"}})
 
