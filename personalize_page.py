@@ -17,7 +17,7 @@ def initialize_config():
         model=os.getenv("BONZAI_MODEL"),
         api_key=os.getenv("BONZAI_API_KEY"),
         api_base=os.getenv("BONZAI_URL"),
-        temperature = 0.4
+        temperature=0.4
     )
 
     cms_config = {
@@ -53,7 +53,7 @@ config = initialize_config()
 # region Langgraph nodes
 class AgentState(TypedDict):
     content_type_uid: str
-    customer_information : dict
+    customer_information: dict
     page_list: dict
     asset_list: dict
     personalized_page: dict
@@ -97,7 +97,7 @@ def fetch_data_node(state: AgentState):
     # Extract the page to customize
     for page in state["page_list"]["entries"]:
         if page["title"] == "Our services":
-            state["personalized_page"] = page # TODO: This will be replaced by an agent deciding what pages to personalize
+            state["personalized_page"] = page  # TODO: This will be replaced by an agent deciding what pages to personalize
 
     state["is_retry_step"] = False
 
@@ -116,7 +116,8 @@ def fetch_data_node(state: AgentState):
         state["personalization_queue"] = []
         return state
 
-def personalization_router_node (state:AgentState):
+
+def personalization_router_node(state: AgentState):
     """Router node for logging."""
     if len(state["personalization_queue"]) > 1:
         print(f"Next step: {state['personalization_queue'][0]}")
@@ -125,7 +126,8 @@ def personalization_router_node (state:AgentState):
 
     return state
 
-def determine_next_step (state: AgentState):
+
+def determine_next_step(state: AgentState):
     """Route to the next step of the personalization process."""
     if len(state["personalization_queue"]) != 0:
         match state["personalization_queue"][0]:
@@ -141,7 +143,8 @@ def determine_next_step (state: AgentState):
     else:
         return "end"
 
-def personalize_texts_node (state:AgentState):
+
+def personalize_texts_node(state: AgentState):
     """Personalize text(s): generate a tailored text based on the content of the generic page and the customer's background."""
     print("Personalizing text...")
 
@@ -229,22 +232,25 @@ def personalize_texts_node (state:AgentState):
         return state
 
 
-
-def personalize_images_node (state:AgentState):
+def personalize_images_node(state: AgentState):
     """Personalize image(s): choose the best fitting image for the content of the page and the customer's background."""
     print("Personalizing image...")
 
     # Strip assets information to essential data for LLM
     stripped_asset_list = []
     for asset in state["asset_list"]["assets"]:
-        stripped_asset = {"title": asset.get("title", "No title found"), "filename": asset.get("filename"), "description": asset.get("description", "No description found"), "tags": asset.get("tags", [])}
+        stripped_asset = {"title": asset.get("title", "No title found"), "filename": asset.get("filename"),
+                          "description": asset.get("description", "No description found"),
+                          "tags": asset.get("tags", [])}
         stripped_asset_list.append(stripped_asset)
 
     # Define output structure
     class Image(BaseModel):
         titles: list = Field(description="The list with the titles of the chosen images.")
-        block_uids: list = Field(description="The list with the UIDs of the blocks where the chosen images should be put.")
-        explanation: str = Field(description="The explanation of why you chose these images and why you placed them in the blocks you chose.")
+        block_uids: list = Field(
+            description="The list with the UIDs of the blocks where the chosen images should be put.")
+        explanation: str = Field(
+            description="The explanation of why you chose these images and why you placed them in the blocks you chose.")
 
     try:
         response = config["llm"].with_structured_output(Image).invoke(f"""
@@ -269,7 +275,7 @@ def personalize_images_node (state:AgentState):
 
                 Information you can use:
                 Block list: {state['personalized_page']["blocks"]}.
-                Image list: {stripped_asset_list}
+                Image list: {stripped_asset_list}.
                 Customer information: {state['customer_information']}.
         """)
 
@@ -298,10 +304,13 @@ def personalize_images_node (state:AgentState):
         else:
             if state["is_retry_step"]:
                 state["personalization_queue"] = []
-                print(f"An error occurred when personalizing the image of a page: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids})do not exist.")
-                state["personalized_page"] = {"Error": f"Error: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist."}
+                print(
+                    f"An error occurred when personalizing the image of a page: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids})do not exist.")
+                state["personalized_page"] = {
+                    "Error": f"Error: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist."}
             else:
-                print(f"One or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist, trying again.")
+                print(
+                    f"One or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist, trying again.")
                 state["is_retry_step"] = True
             return state
 
@@ -320,7 +329,8 @@ def personalize_images_node (state:AgentState):
             state["is_retry_step"] = True
         return state
 
-def personalize_element_order_node (state:AgentState):
+
+def personalize_element_order_node(state: AgentState):
     """Change the order of blocks on a page: change the blocks based on the content of the generic page and the customer's background."""
     print("Personalizing order of elements...")
 
@@ -381,11 +391,13 @@ def personalize_element_order_node (state:AgentState):
             state["personalized_page"] = {"Error": str(e)}
             state["personalization_queue"] = []
         else:
-            print(f"An error occurred when personalizing the order of the elements of a page, trying again. Error message: {str(e)}")
+            print(
+                f"An error occurred when personalizing the order of the elements of a page, trying again. Error message: {str(e)}")
             state["is_retry_step"] = True
         return state
 
-def save_personalized_page_node (state:AgentState):
+
+def save_personalized_page_node(state: AgentState):
     """Save the personalized page in the database."""
     print("Saving personalized page...")
 
@@ -417,9 +429,12 @@ def save_personalized_page_node (state:AgentState):
             print(f"An error occurred while saving the personalized page in the database: {str(e)}")
             state["personalization_queue"] = []
         else:
-            print(f"An error occurred while saving the personalized page in the database, trying again. Error message: {str(e)}")
+            print(
+                f"An error occurred while saving the personalized page in the database, trying again. Error message: {str(e)}")
             state["is_retry_step"] = True
         return state
+
+
 # endregion
 
 # Create graph
@@ -451,5 +466,6 @@ graph.add_edge("SavePersPage", END)
 personalizationAgent = graph.compile()
 
 # Run agent
-result = personalizationAgent.invoke({"content_type_uid": "page", "customer_information": {"segment": "Construction", "Company_Size": "50-200", "Geographic_Region": "Netherlands"}})
-
+result = personalizationAgent.invoke({"content_type_uid": "page",
+                                      "customer_information": {"segment": "Construction", "Company_Size": "50-200",
+                                                               "Geographic_Region": "Netherlands"}})
