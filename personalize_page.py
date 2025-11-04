@@ -21,11 +21,16 @@ def initialize_config():
     )
 
     cms_config = {
-        "base_url": os.getenv("CONTENTSTACK_URL"),
-        "api_key": os.getenv("CONTENTSTACK_API_KEY"),
-        "delivery_token": os.getenv("CONTENTSTACK_DELIVERY_TOKEN"),
-        "management_token": os.getenv("CONTENTSTACK_MANAGEMENT_TOKEN"),
-        "environment": os.getenv("CONTENTSTACK_ENVIRONMENT")
+        "base_url": os.getenv("CMS_BASE_URL"),
+        "api_key": os.getenv("CMS_API_KEY"),
+        "delivery_token": os.getenv("CMS_DELIVERY_TOKEN"),
+        "management_token": os.getenv("CMS_MANAGEMENT_TOKEN"),
+        "environment": os.getenv("CMS_ENVIRONMENT")
+    }
+
+    cdp_config = {
+        "base_url": os.getenv("CDP_BASE_URL"),
+        "api_key": os.getenv("CDP_API_KEY")
     }
 
     db_config = {
@@ -33,10 +38,11 @@ def initialize_config():
         "db_name": os.getenv("MONGODB_DATABASE")
     }
 
-    config_variables = {"llm": llm_config, "cms": cms_config, "db": db_config}
+    config_variables = {"llm": llm_config, "cms": cms_config, "db": db_config, "cdp": cdp_config}
 
     print("Connected CMS: " + config_variables["cms"]["base_url"])
-    print("Connected LLM: " + config_variables["llm"].model)
+    print("Connected CDP: " + config_variables["cdp"]["base_url"])
+    print("Connected LLM Router: " + config_variables["llm"].api_base + " with model: " + config_variables["llm"].model)
 
     try:
         config_variables["db"]["client"].admin.command('ping')
@@ -53,6 +59,8 @@ config = initialize_config()
 # region Langgraph nodes
 class AgentState(TypedDict):
     content_type_uid: str
+    customer_uid: str
+    customer_profile: dict
     customer_information: dict
     page_list: dict
     asset_list: dict
@@ -62,28 +70,39 @@ class AgentState(TypedDict):
 
 
 def fetch_data_node(state: AgentState):
-    """Retrieve all pages and assets from ContentStack."""
-    # Create API calls
-    headers = {
+    """Retrieve the following data from their respective API endpoints:
+        - CMS pages
+        - CMS assets
+        - CDP customer information
+    """
+    # Create ContentStack API calls
+    contentstack_headers = {
         "api_key": config["cms"]["api_key"],
         "access_token": config["cms"]["delivery_token"],
         "Content-Type": "application/json"
     }
 
-    params = {
+    contentstack_params = {
         "environment": config["cms"]["environment"],
         "include[]": "header_reference"
     }
 
-    retrieve_pages_url = f"https://{config['cms']['base_url']}/v3/content_types/{state['content_type_uid']}/entries"
-    retrieve_assets_url = f"https://{config['cms']['base_url']}/v3/assets"
+    retrieve_pages_url = f"{config['cms']['base_url']}/content_types/{state['content_type_uid']}/entries"
+    retrieve_assets_url = f"{config['cms']['base_url']}/assets"
+
+    # Create Lytics API calls
+    customer_information_headers = {
+        "authorization": config["cdp"]["api_key"]
+    }
+
+    customer_information_url = f"{config['cdp']['base_url']}/entity/user/_uid/{state['customer_uid']}"
 
     # Setup personalization queue and extract page to personalize
     state["personalization_queue"] = ["text", "image", "order", "save"]  # TODO: This will be replaced by an agent deciding the steps to execute
 
     # Retrieve pages from ContentStack
     try:
-        response = requests.get(retrieve_pages_url, headers=headers, params=params)
+        response = requests.get(retrieve_pages_url, headers=contentstack_headers, params=contentstack_params)
         response.raise_for_status()
         page_list = response.json()
 
@@ -103,18 +122,95 @@ def fetch_data_node(state: AgentState):
 
     # Retrieve assets from ContentStack
     try:
-        response = requests.get(retrieve_assets_url, headers=headers, params=params)
+        response = requests.get(retrieve_assets_url, headers=contentstack_headers, params=contentstack_params)
         response.raise_for_status()
         asset_list = response.json()
 
         state["asset_list"] = asset_list
         print("Retrieved assets from CMS")
 
-        return state
     except requests.exceptions.RequestException as e:
         print(f"An error occurred while retrieving assets from CMS: {str(e)}")
         state["personalization_queue"] = []
         return state
+
+    # Retrieve customer information from Customer Data Platform
+    try:
+        response = requests.get(customer_information_url, headers=customer_information_headers)
+        response.raise_for_status()
+        customer_profile = response.json()
+
+        print(customer_profile)
+
+        state["customer_profile"] = customer_profile
+        print("Retrieved customer information from CDP")
+        return state
+
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred while retrieving customer information from CDP: {str(e)}")
+        state["personalization_queue"] = []
+        return state
+
+def analyze_email_domain_node(state: AgentState):
+    """Analyze the email domain of the user, to find information about the company and industry the user works in."""
+
+    # TODO: Check for private emails (outlook/gmail) and exit if it is private.
+
+    email_domain_to_analyze = state["customer_profile"]["data"]["email_domain"]
+
+    print (email_domain_to_analyze)
+
+    class CompanyInformation(BaseModel):
+        company_size: int
+        industry: str
+        country: str
+        steps_executed: str
+
+
+    try:
+        response = config["llm"].with_structured_output(CompanyInformation).invoke(f"""
+                        You are an expert in investigating the company behind email domains. 
+                        
+                        Your task: Analyse the {email_domain_to_analyze} domain and use the name to get an understanding of the organization the user works in. 
+
+                        CRITICAL RULES:
+                        1. You should find the size of the company/organization mentioned in the email domain, how many people work there?
+                        2. You should find the industry or sector of the company/organization mentioned in the email domain.
+                        3. You should search for the country the company/organization mentioned in the email domain is located in. If there are multiple locations, look for the biggest or most used one.
+                        4. Don't hallucinate, make sure the information you provide does exist.
+                        5. If you can't find the company size provide a -1 for company size or 'not found' for when you can't find the industry or country of the company.
+                        
+                        Please provide as your answer:
+                        1. Company size: this should be an estimate of the amount of employees working at the company mentioned in the email domain.
+                        2. Industry: the industry/sector of the company mentioned in the email domain.
+                        3. Country: the country where the company mentioned in the email domain is located in.
+                        4. Steps executed: provide the steps you have executed to get to your answers.
+
+                        Information you can use:
+                        Email domain: {email_domain_to_analyze}
+                        """)
+
+        print(response)
+
+        # TODO: better error handling, should continue as long as industry has been found
+        if response.company_size != -1 and response.industry != "not found" and response.country != "not found":
+
+            state["customer_information"] = response
+
+            print(state["customer_information"])
+            return state
+
+    except Exception as e:
+        if state["is_retry_step"]:
+            state["personalization_queue"] = []
+            print(f"An error occurred when analyzing the email domain: {str(e)}")
+            state["personalized_page"] = {"Error": str(e)}
+        else:
+            print(f"An error occurred when analyzing the email domain, trying again. Error message: {str(e)}")
+            state["is_retry_step"] = True
+        return state
+
+
 
 
 def personalization_router_node(state: AgentState):
@@ -122,7 +218,7 @@ def personalization_router_node(state: AgentState):
     if len(state["personalization_queue"]) > 1:
         print(f"Next step: {state['personalization_queue'][0]}")
     else:
-        print("Page has been personalized successfully")
+        print("Page personalization process finished.")
 
     return state
 
@@ -261,7 +357,7 @@ def personalize_images_node(state: AgentState):
                 2. You can analyze images by looking at their title, filename, description and tags.
                 3. The image you choose must fit the title and/or copy of the block and should also fit with the customer's interests.
                 4. Images already present in blocks can also be changed, but it is not mandatory
-                5. It is mandatory to have at least one block with an image, more blocks with an image are allowed.
+                5. It is mandatory to have at least TWO blocks with an image, more blocks with an image are allowed. less is not allowed, so at least TWO
                 6. A block can only have one image.
                 7. Every image needs to have a block to be displayed in, so there should be as many block UIDs as titles
                 8. You can find the UID of a block in _metadata.
@@ -351,7 +447,7 @@ def personalize_element_order_node(state: AgentState):
                 Your task: use "Customer information" and "Block list" to create a personalized order for the blocks of the provided page.
                 Important: 
                 1. Use "Customer information" to decide what blocks are the most relevant for the customer.
-                2. Place the most relevant blocks first in the order.
+                2. Place the most relevant blocks first in the order. And make sure to change the place of at least one block in a different place.
                 3. All blocks need to be in the list, so the amount of blocks in the Block list should be the same as the amount of UIDs given in the answer.
                 4. The new order may NEVER conflict with the natural flow between the blocks, so make sure that when reading the blocks in your new order it feels like a natural flow of text.
                 5. You are not allowed to change the text in the blocks.
@@ -440,6 +536,7 @@ def save_personalized_page_node(state: AgentState):
 # Create graph
 graph = StateGraph(AgentState)
 graph.add_node("FetchData", fetch_data_node)
+graph.add_node("AnalyzeEmail", analyze_email_domain_node)
 graph.add_node("PersTexts", personalize_texts_node)
 graph.add_node("PersImages", personalize_images_node)
 graph.add_node("PersElmtOrder", personalize_element_order_node)
@@ -447,7 +544,8 @@ graph.add_node("Router", personalization_router_node)
 graph.add_node("SavePersPage", save_personalized_page_node)
 
 graph.add_edge(START, "FetchData")
-graph.add_edge("FetchData", "Router")
+graph.add_edge("FetchData", "AnalyzeEmail")
+graph.add_edge("AnalyzeEmail", "Router")
 graph.add_conditional_edges(
     "Router",
     determine_next_step,
@@ -465,7 +563,5 @@ graph.add_edge("PersElmtOrder", "Router")
 graph.add_edge("SavePersPage", END)
 personalizationAgent = graph.compile()
 
-# Run agent
-result = personalizationAgent.invoke({"content_type_uid": "page",
-                                      "customer_information": {"segment": "Construction", "Company_Size": "50-200",
-                                                               "Geographic_Region": "Netherlands"}})
+# Run agent for customer Johnny Hive
+result = personalizationAgent.invoke({"content_type_uid": "page", "customer_uid": "fe15c42d-a7c1-4b23-ab74-cde617a9c494"})
