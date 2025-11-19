@@ -1,8 +1,8 @@
-from typing import TypedDict
+from typing import TypedDict, List
 from dotenv import load_dotenv
-from langchain_litellm import ChatLiteLLM
+from langchain_openai import ChatOpenAI
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.tools import tool
+from langchain.tools import tool
 from langchain.agents import create_agent
 from langgraph.graph import StateGraph, START, END
 from pymongo import MongoClient
@@ -16,10 +16,10 @@ import prompts
 def initialize_config():
     load_dotenv()
 
-    llm_config = ChatLiteLLM(
+    llm_config = ChatOpenAI(
         model=os.getenv("BONZAI_MODEL"),
         api_key=os.getenv("BONZAI_API_KEY"),
-        api_base=os.getenv("BONZAI_URL"),
+        base_url=os.getenv("BONZAI_URL"),
         temperature=0.4
     )
 
@@ -45,7 +45,7 @@ def initialize_config():
 
     print("Connected CMS: " + config_variables["cms"]["base_url"])
     print("Connected CDP: " + config_variables["cdp"]["base_url"])
-    print("Connected LLM Router: " + config_variables["llm"].api_base + " with model: " + config_variables["llm"].model)
+    print("Connected LLM Router: " + config_variables["llm"].openai_api_base + " with model: " + config_variables["llm"].model_name)
 
     try:
         config_variables["db"]["client"].admin.command('ping')
@@ -322,11 +322,9 @@ def personalize_images_node(state: AgentState):
 
     # Define output structure
     class Image(BaseModel):
-        titles: list = Field(description="The list with the titles of the chosen images.")
-        block_uids: list = Field(
-            description="The list with the UIDs of the blocks where the chosen images should be put.")
-        explanation: str = Field(
-            description="The explanation of why you chose these images and why you placed them in the blocks you chose.")
+        titles: List[str] = Field(description="The list with the titles of the chosen images.")
+        block_uids: List[str]  = Field(description="The list with the UIDs of the blocks where the chosen images should be put.")
+        explanation: List[str]  = Field(description="The explanation of why you chose these images and why you placed them in the blocks you chose.")
 
     try:
         response = config["llm"].with_structured_output(Image).invoke(prompts.personalize_images.format(
@@ -391,7 +389,7 @@ def personalize_element_order_node(state: AgentState):
 
     # Define output structure
     class GeneratedOrder(BaseModel):
-        block_order: list = Field(description="The order of the blocks by page uid.")
+        block_order: List[str] = Field(description="The order of the blocks by page uid.")
         explanation: str = Field(description="The reason why this order is better.")
 
     # Create stripped block list without the first element (first element should always be on top of page)
