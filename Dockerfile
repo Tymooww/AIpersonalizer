@@ -2,8 +2,12 @@ FROM python:3.10.11-slim
 
 WORKDIR /AIpersonalizer
 
-RUN pip install python-dotenv langchain-openai langchain-community langchain langgraph pymongo pydantic requests ddgs
+COPY requirements.txt requirements.txt
+RUN pip install -r requirements.txt
 
 COPY . .
 
-CMD ["python", "./personalize_page.py"]
+EXPOSE 8080
+
+ENV FLASK_APP=app.py
+CMD ["python", "-m", "flask", "run", "--host=0.0.0.0", "--port=8080"]

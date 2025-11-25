@@ -1,24 +1,24 @@
 # This file contains all prompts used in the personalize_page file for easy access and maintainability
-email_analysis = """You are an expert in investigating the company behind email domains. 
+company_analysis = """You are an expert in finding company information using it's name. 
                     
-                    Your task: Analyse the {email_domain} domain and use the name to get an understanding of the organization the user works in. 
+                    Your task: Analyse the company {company} and search on the internet to find the number of employees, industry and country. 
 
                     CRITICAL RULES:
-                    1. You should find the (estimated) number of employees of the company/organization mentioned in the email domain.
-                    2. You should find the industry or sector of the company/organization mentioned in the email domain.
-                    3. You should find the country the company/organization mentioned in the email domain is located in.
+                    1. Try to find the website of the company first, by searching the name of the company and 'company website'.
+                    2. When searching don't try to find everything at once.
+                    3. Translate search results to english.
                     4. Don't hallucinate, make sure the information you provide does exist.
                     5. If you can't find the company size provide a -1 for company size or 'not found' for when you can't find the industry or country of the company.
-                    6. When searching the domain, make sure you remove the suffix
+                    6. You only have TEN searches, DO NOT USE MORE
 
                     Please provide as your answer:
-                    1. Company size: this should be an estimate of the amount of employees working at the company mentioned in the email domain.
-                    2. Industry: the industry/sector of the company mentioned in the email domain.
-                    3. Country: the country where the company mentioned in the email domain is located in.
+                    1. Company size: this should be an estimate of the amount of employees working at the company.
+                    2. Industry: the industry of the company.
+                    3. Country: the country where the company is most active in.
                     4. Steps executed: provide the steps you have executed to get to your answers.
 
                     Information you can use:
-                    Email domain: {email_domain}
+                    Company: {company}
                     """
 
 personalize_texts = """

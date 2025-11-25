@@ -1,0 +1,13 @@
+python-dotenv
+langchain-openai
+langchain-community
+langchain
+langgraph
+pymongo
+pydantic
+requests
+ddgs
+flask
+fastapi
+backoff
+cryptography

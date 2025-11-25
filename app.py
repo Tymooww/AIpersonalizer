@@ -1,12 +1,13 @@
 from typing import TypedDict, List
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_community.tools import DuckDuckGoSearchRun
+from ddgs import DDGS
 from langchain.tools import tool
 from langchain.agents import create_agent
 from langgraph.graph import StateGraph, START, END
 from pymongo import MongoClient
 from pydantic import BaseModel, Field
+from flask import Flask, request
 import os
 import requests
 import prompts
@@ -55,20 +56,26 @@ def initialize_config():
 
     return config_variables
 
-
 config = initialize_config()
 # endregion
 
 # region Agentic tools
 @tool
-def search_web(item_to_search: str) -> str:
+def search_web(item_to_search: str) -> list:
     """Search a specific company on the internet."""
     print(f"Searching the web for '{item_to_search}'...")
 
-    search_result = DuckDuckGoSearchRun().run(item_to_search)
-
-    print ("Search result: " + str(search_result))
-    return str(search_result)
+    with DDGS() as ddgs:
+        results = ddgs.text(
+            item_to_search,
+            region='uk',
+            language='en',
+            safesearch='moderate',
+            max_results=3
+        )
+        for item in list(results):
+            print("Search result: " + str(item))
+        return list(results)
 
 tools = [search_web]
 # endregion
@@ -77,6 +84,7 @@ tools = [search_web]
 class AgentState(TypedDict):
     content_type_uid: str
     customer_uid: str
+    customer_organization: str
     customer_profile: dict
     customer_information: dict
     page_list: dict
@@ -106,13 +114,6 @@ def fetch_data_node(state: AgentState):
 
     retrieve_pages_url = f"{config['cms']['base_url']}/content_types/{state['content_type_uid']}/entries"
     retrieve_assets_url = f"{config['cms']['base_url']}/assets"
-
-    # Create Lytics API calls (CDP)
-    customer_information_headers = {
-        "authorization": config["cdp"]["api_key"]
-    }
-
-    customer_information_url = f"{config['cdp']['base_url']}/entity/user/_uid/{state['customer_uid']}"
 
     # Setup personalization queue and extract page to personalize
     state["personalization_queue"] = ["text", "image", "order", "save"]  # TODO: This will be replaced by an agent deciding the steps to execute
@@ -151,35 +152,60 @@ def fetch_data_node(state: AgentState):
         state["personalization_queue"] = []
         return state
 
-    # Retrieve customer information from Customer Data Platform
+    # Create Lytics API calls (CDP)
     try:
-        response = requests.get(customer_information_url, headers=customer_information_headers)
-        response.raise_for_status()
-        customer_profile = response.json()
+        customer_information_headers = {
+            "authorization": config["cdp"]["api_key"]
+        }
 
-        state["customer_profile"] = customer_profile
-        print("Retrieved customer information from CDP")
+        customer_information_url = f"{config['cdp']['base_url']}/entity/user/_uid/{state['customer_uid']}"
+
+        # Retrieve customer information from Customer Data Platform
+        try:
+            response = requests.get(customer_information_url, headers=customer_information_headers)
+            response.raise_for_status()
+            customer_profile = response.json()
+
+            state["customer_profile"] = customer_profile
+            print("Retrieved customer information from CDP")
+            return state
+
+        except requests.exceptions.RequestException as e:
+            print(f"An error occurred while retrieving customer information from CDP: {str(e)}")
+            state["personalization_queue"] = []
+            return state
+    except:
         return state
 
-    except requests.exceptions.RequestException as e:
-        print(f"An error occurred while retrieving customer information from CDP: {str(e)}")
-        state["personalization_queue"] = []
-        return state
 
-
-def analyze_email_domain_node(state: AgentState):
+def analyze_company_node(state: AgentState):
     """Analyze the email domain of the user, to find information about the company and industry the user works in."""
 
-    email_domain_to_analyze = state["customer_profile"]["data"]["email_domain"]
+    try:
+        email_domain_to_analyze = state["customer_profile"]["data"]["email_domain"]
+        is_email_analysis = True
 
-    # Check if the domain is private
-    if email_domain_to_analyze == "gmail.com" or email_domain_to_analyze == "outlook.com":
-        print(f"Email address is not a business email, therefor domain can't be analyzed")
-        state["personalized_page"] = {"Error": "Email address is not a business email"}
-        state["personalization_queue"] = []
-        return state
+    except:
+        if state["customer_organization"] != None:
+            is_email_analysis = False
+        else:
+            state["personalization_queue"] = []
+            print(f"An error occurred when analyzing the email domain: user has no email domain information or user_id is incorrect")
+            state["personalized_page"] = {"Error": "user has no email domain information or user_id is incorrect"}
+            return state
+
+
+    if is_email_analysis:
+        # Check if the domain is private
+        if email_domain_to_analyze == "gmail.com" or email_domain_to_analyze == "outlook.com":
+            print(f"Email address is not a business email, therefor domain can't be analyzed")
+            state["personalized_page"] = {"Error": "Email address is not a business email"}
+            state["personalization_queue"] = []
+            return state
+        else:
+            print (f"Analyzing email domain {email_domain_to_analyze}...")
     else:
-        print (f"Analyzing email domain {email_domain_to_analyze}...")
+        print(f"Analyzing organization from IP: {state['customer_organization']}")
 
     # Create agent with structured output
     class CompanyInformation(BaseModel):
@@ -188,14 +214,17 @@ def analyze_email_domain_node(state: AgentState):
         country: str
         steps_executed: str
 
-    email_domain_analyzer_agent = create_agent(
+    company_analyzer_agent = create_agent(
         model = config["llm"],
         tools = tools,
         response_format = CompanyInformation
     )
 
     try:
-        response = email_domain_analyzer_agent.invoke({"messages": [("user", prompts.email_analysis.format(email_domain=email_domain_to_analyze))]})
+        if is_email_analysis:
+            response = company_analyzer_agent.invoke({"messages": [("user", prompts.company_analysis.format(company=email_domain_to_analyze))]})
+        else:
+            response = company_analyzer_agent.invoke({"messages": [("user", prompts.company_analysis.format(company=state["customer_organization"]))]})
         response = response["structured_response"]
 
         print("Analysis result: " + str(response))
@@ -214,10 +243,17 @@ def analyze_email_domain_node(state: AgentState):
         else:
             if state["is_retry_step"]:
                 state["personalization_queue"] = []
-                print(f"Unable to find the industry of the email domain: {email_domain_to_analyze}")
-                state["personalized_page"] = {"Error": f"Unable to find the industry of the email domain: {email_domain_to_analyze}"}
+                if is_email_analysis:
+                    print(f"Unable to find the industry of the email domain: {email_domain_to_analyze}")
+                    state["personalized_page"] = {"Error": f"Unable to find the industry of the email domain: {email_domain_to_analyze}"}
+                else:
+                    print(f"Unable to find the industry of the company: {state['customer_organization']}")
+                    state["personalized_page"] = {"Error": f"Unable to find the industry of the company: {state['customer_organization']}"}
             else:
-                print(f"Unable to find the industry of the email domain: {email_domain_to_analyze}, trying again.")
+                if is_email_analysis:
+                    print(f"Unable to find the industry of the email domain: {email_domain_to_analyze}, trying again.")
+                else:
+                    print(f"Unable to find the industry of the company: {state['customer_organization']}")
                 state["is_retry_step"] = True
             return state
 
@@ -475,7 +511,7 @@ def save_personalized_page_node(state: AgentState):
 # region Create graph
 graph = StateGraph(AgentState)
 graph.add_node("FetchData", fetch_data_node)
-graph.add_node("AnalyzeEmail", analyze_email_domain_node)
+graph.add_node("AnalyzeCompany", analyze_company_node)
 graph.add_node("PersTexts", personalize_texts_node)
 graph.add_node("PersImages", personalize_images_node)
 graph.add_node("PersElmtOrder", personalize_element_order_node)
@@ -483,8 +519,8 @@ graph.add_node("Router", personalization_router_node)
 graph.add_node("SavePersPage", save_personalized_page_node)
 
 graph.add_edge(START, "FetchData")
-graph.add_edge("FetchData", "AnalyzeEmail")
-graph.add_edge("AnalyzeEmail", "Router")
+graph.add_edge("FetchData", "AnalyzeCompany")
+graph.add_edge("AnalyzeCompany", "Router")
 graph.add_conditional_edges(
     "Router",
     determine_next_step,
@@ -503,5 +539,25 @@ graph.add_edge("SavePersPage", END)
 personalizationAgent = graph.compile()
 # endregion
 
-# Run agent for customer
-result = personalizationAgent.invoke({"content_type_uid": "page", "customer_uid": "fe15c42d-a7c1-4b23-ab74-cde617a9c494"})
+# Run Flask server to check for incoming personalization requests
+app = Flask(__name__)
+
+@app.route("/personalize", methods=["POST"])
+def personalization_request():
+    # Retrieve payload and check request
+    payload = request.get_json()
+
+    if "customer_organization" in payload or "customer_uid" in payload:
+        payload["content_type_uid"] = "page"
+
+        # Call the agent and check for errors when done
+        result = personalizationAgent.invoke(payload)
+        if "Error" in result["personalized_page"]:
+            return {"Internal Server Error": result["personalized_page"]["Error"]}, 500
+        else:
+            return {"Success": "The personalization process has been completed successfully."}, 200
+    else:
+        return {"Bad Request Error": "No customer_id or customer_organization in payload."}, 400
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080, debug=False)

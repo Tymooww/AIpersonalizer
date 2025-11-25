@@ -1,0 +1,7 @@
+services:
+  ai-personalizer:
+    build: .
+    image: aipersonalizer:latest
+    container_name: aipersonalizer
+    ports:
+      - "8080:8080"
