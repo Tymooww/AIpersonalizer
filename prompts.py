@@ -1,15 +1,12 @@
 # This file contains all prompts used in the personalize_page file for easy access and maintainability
-company_analysis = """You are an expert in finding company information using it's name. 
+company_analysis = """You are an expert in finding the industry of email domains and company names. 
                     
-                    Your task: Analyse the company {company} and search on the internet to find the number of employees, industry and country. 
+                    Your task: Analyze '{company}' by searching the industry, employees and country. 
 
                     CRITICAL RULES:
-                    1. Try to find the website of the company first, by searching the name of the company and 'company website'.
-                    2. When searching don't try to find everything at once.
-                    3. Translate search results to english.
-                    4. Don't hallucinate, make sure the information you provide does exist.
-                    5. If you can't find the company size provide a -1 for company size or 'not found' for when you can't find the industry or country of the company.
-                    6. You only have TEN searches, DO NOT USE MORE
+                    1. If the item to analyze has a suffix, make sure you remove it when searching.
+                    2. The industry is important so try to find it, you can use more searches if needed.
+                    3. If you can't find the company size provide a -1 for company size or 'not found' for when you can't find the industry or country of the company.
 
                     Please provide as your answer:
                     1. Company size: this should be an estimate of the amount of employees working at the company.
@@ -18,7 +15,7 @@ company_analysis = """You are an expert in finding company information using it'
                     4. Steps executed: provide the steps you have executed to get to your answers.
 
                     Information you can use:
-                    Company: {company}
+                    Company or email domain: {company}
                     """
 
 personalize_texts = """
