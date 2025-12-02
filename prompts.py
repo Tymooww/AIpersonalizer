@@ -18,24 +18,46 @@ company_analysis = """You are an expert in finding the industry of email domains
                     Company or email domain: {company}
                     """
 
-decide_pages_to_personalize = """Analyze which pages should be personalized and WHICH personalization steps for each page.
+decide_pages_to_personalize = """Your task is to analyze and decide which pages should be personalized. 
 
-                    Customer: {customer_industry}
+                    Customer industry: {customer_industry}
                     Available pages: {pages}
-                    IMPORTANT INCLUDE THE HOME PAGE
 
-                    For each page, decide if it needs:
-                    - 'text': Personalize copy text and titles
-                    - 'images': Change images to better fit customer
+                    For each page, decide if it could benefit from at least one of the personalizations:
+                    - 'text': Personalize the text and titles
+                    - 'image': Changing images to better fit the customer
                     - 'order': Reorder blocks based on customer priorities
 
                     Consider:
-                    - Pages without text_blocks don't need 'text' personalization
-                    - Pages without images don't need 'images' personalization  
-                    - Pages with <2 blocks don't need 'order' personalization
+                    - Personalization is most effective on pages that have products or links to other pages listed on them.
+                    - Pages without text don't need 'text' personalization
+                    - Pages with less then 2 blocks don't need 'order' personalization
                     - Different industries care about different aspects
-                    - Give the titles of the pages in your answer
                     
+                    Provide: 
+                    - Personalization_list: the titles of the pages where you think personalization is valuable
+                    - Explanation: the reason why you think personalization is valuable for these pages                    
+                    """
+
+decide_components_to_personalize = """Your task is to analyze which components should be personalized for the page given.
+
+                    Customer industry: {customer_industry}
+                    The page to personalize: {page_blocks}
+
+                    For each page, decide if it needs:
+                    - 'text': Personalizes the text of the page
+                    - 'image': Personalizes the images of the page
+                    - 'order': Personalizes the order of the page blocks based on customer priorities
+
+                    Consider:
+                    - Pages without text don't need 'text' personalization
+                    - Pages with less then 2 blocks don't need 'order' personalization
+                    - Different industries care about different aspects
+                    - Personalization is most effective on pages that have products listed on them.
+                    
+                    Provide: 
+                    - Personalization_list: the names of the personalization(s) you think are valuable for the customer
+                    - Explanation: the reason why you think your chosen personalizations are valuable
                     """
 
 personalize_texts = """

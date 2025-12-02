@@ -8,6 +8,9 @@ pydantic
 requests
 ddgs
 flask
+flask[async]
+flask_talisman
+flask_httpauth
 fastapi
 backoff
 cryptography

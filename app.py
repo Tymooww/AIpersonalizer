@@ -1,12 +1,13 @@
 import asyncio
 from copy import deepcopy
-from typing import TypedDict, List
+from typing import TypedDict, List, Literal
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from ddgs import DDGS
 from langchain.tools import tool
 from langchain.agents import create_agent
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import Command
 from pymongo import MongoClient
 from pydantic import BaseModel, Field
 from flask import Flask, request
@@ -192,7 +193,7 @@ def analyze_company_node(state: PreparationState):
         if state["customer_organization"] is not None:
             is_email_analysis = False
         else:
-            print(f"An error occurred when analyzing the email domain: user has no email domain information or user_id is incorrect")
+            print(f"An error occurred when analyzing the email domain: user has no IP organization or known email, personalization is not therefor not possible")
             state["error_occurred"] = True
             return state
 
@@ -299,7 +300,6 @@ async def parallel_processing_node(state:PreparationState):
     base_parameters = {
         "customer_information": state["customer_information"],
         "asset_list": state["asset_list"],
-        "personalization_queue": ["text", "image", "order", "save"],  # TODO: This will be replaced by an agent deciding the steps to execute
         "is_retry_step": False
     }
 
@@ -321,31 +321,67 @@ async def parallel_processing_node(state:PreparationState):
     return state
 
 
-def personalization_router_node(state: PersonalizationProcessState):
-    """Router node, used for logging."""
-    if len(state["personalization_queue"]) > 1:
-        print(f"[{state['page_to_personalize']['title']}] Next step: {state['personalization_queue'][0]}")
-    else:
-        print(f"Page personalization process for [{state['page_to_personalize']['title']}] page finished.")
+def decide_components_to_personalize_node(state: PersonalizationProcessState):
+    """Investigate the page to personalize and determine what components could benefit from personalization."""
 
-    return state
+    print(f"[{state['page_to_personalize']['title']}] Deciding what components to personalize...")
+
+    # Create agent with structured output
+    class PersonalizationSteps(BaseModel):
+        personalization_list: List[str]
+        explanation: str
+
+    try:
+        # Decide what components could benefit from personalization
+        response = config["llm"].with_structured_output(PersonalizationSteps).invoke(
+                prompts.decide_components_to_personalize.format(
+                    customer_industry=state["customer_information"]["industry"],
+                    page_blocks=state["page_to_personalize"]["blocks"]))
+
+        # Create personalization_queue
+        if response.personalization_list is not None:
+            state["personalization_queue"] = response.personalization_list
+            state["personalization_queue"].append("save")
+            print (f"[{state['page_to_personalize']['title']}] Personalization steps to execute: {state['personalization_queue']}")
+        else:
+            if state["is_retry_step"]:
+                state["personalization_queue"] = []
+                print(f"[{state['page_to_personalize']['title']}] Error: Agent chose no components to personalize")
+                state["page_to_personalize"] = {"Error": "Agent chose no components to personalize"}
+            else:
+                print(f"[{state['page_to_personalize']['title']}] Error: Agent chose no components to personalize, trying again")
+                state["is_retry_step"] = True
+
+        return state
+
+    except Exception as e:
+        if state["is_retry_step"]:
+            state["personalization_queue"] = []
+            print(
+                f"[{state['page_to_personalize']['title']}] Agent was unable to decide what components should be personalized: {str(e)}")
+            state["page_to_personalize"] = {"Error": str(e)}
+        else:
+            print(
+                f"[{state['page_to_personalize']['title']}] Agent was unable to decide what components should be personalized, trying again. Error message: {str(e)}")
+            state["is_retry_step"] = True
 
 
-def determine_next_step(state: PersonalizationProcessState):
-    """Route to the next step of the personalization process."""
+def personalization_router_node(state: PersonalizationProcessState) -> Command[Literal["PersTexts", "PersImages", "PersElmtOrder", "SavePersPage", "__end__"]]:
+    """Routes to the next node in the queue."""
     if len(state["personalization_queue"]) != 0:
         match state["personalization_queue"][0]:
             case "text":
-                return "p_texts"
+                goto = "PersTexts"
             case "image":
-                return "p_images"
+                goto = "PersImages"
             case "order":
-                return "p_order"
+                goto = "PersElmtOrder"
             case "save":
-                return "save"
+                goto = "SavePersPage"
 
-    else:
-        return "end"
+        return Command(goto=goto)
+
+    return Command(goto="__end__")
 
 
 def personalize_texts_node(state: PersonalizationProcessState):
@@ -523,7 +559,7 @@ def personalize_element_order_node(state: PersonalizationProcessState):
 
 def save_personalized_page_node(state: PersonalizationProcessState):
     """Save the personalized page in the database."""
-    print(f"[{state['page_to_personalize']['title']}] personalized page...")
+    print(f"[{state['page_to_personalize']['title']}] Saving personalized page...")
 
     # Prepare database connection
     database = config["db"]["client"][config["db"]["db_name"]]
@@ -577,24 +613,17 @@ preparation_graph = prepFlow.compile()
 # GRAPH 2: PERSONALIZATION PROCESS
 persFlow = StateGraph(PersonalizationProcessState)
 
+persFlow.add_node("DecideComponentsToPers", decide_components_to_personalize_node)
 persFlow.add_node("Router", personalization_router_node)
 persFlow.add_node("PersTexts", personalize_texts_node)
 persFlow.add_node("PersImages", personalize_images_node)
 persFlow.add_node("PersElmtOrder", personalize_element_order_node)
 persFlow.add_node("SavePersPage", save_personalized_page_node)
 
-persFlow.add_edge(START, "Router")
-persFlow.add_conditional_edges(
-    "Router",
-    determine_next_step,
-    {
-        "p_texts": "PersTexts",
-        "p_images": "PersImages",
-        "p_order": "PersElmtOrder",
-        "save": "SavePersPage",
-        "end": END
-    }
-)
+# This graph has no edges from the router to other nodes, because it routes to different nodes depending on the chosen personalization steps
+persFlow.add_edge(START, "DecideComponentsToPers")
+persFlow.add_edge("DecideComponentsToPers", "Router")
+
 persFlow.add_edge("PersTexts", "Router")
 persFlow.add_edge("PersImages", "Router")
 persFlow.add_edge("PersElmtOrder", "Router")
