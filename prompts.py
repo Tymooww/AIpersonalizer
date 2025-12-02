@@ -18,6 +18,26 @@ company_analysis = """You are an expert in finding the industry of email domains
                     Company or email domain: {company}
                     """
 
+decide_pages_to_personalize = """Analyze which pages should be personalized and WHICH personalization steps for each page.
+
+                    Customer: {customer_industry}
+                    Available pages: {pages}
+                    IMPORTANT INCLUDE THE HOME PAGE
+
+                    For each page, decide if it needs:
+                    - 'text': Personalize copy text and titles
+                    - 'images': Change images to better fit customer
+                    - 'order': Reorder blocks based on customer priorities
+
+                    Consider:
+                    - Pages without text_blocks don't need 'text' personalization
+                    - Pages without images don't need 'images' personalization  
+                    - Pages with <2 blocks don't need 'order' personalization
+                    - Different industries care about different aspects
+                    - Give the titles of the pages in your answer
+                    
+                    """
+
 personalize_texts = """
                     You are an expert in personalized marketing.
 
@@ -81,7 +101,7 @@ personalize_images = """
                     
                 Please provide as your answer:
                 1. Title: this title is from the image you want to place.
-                2. Block UID: this UID is from the block you want to place the image.
+                2. Block UID: this UID is from the block you want to place the image, copy it from the block list.
                 3. A brief explanation of why you chose these images and why you placed them in the blocks you chose, focused on the main improvements.
 
                 Information you can use:
