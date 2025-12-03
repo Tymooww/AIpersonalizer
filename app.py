@@ -1,4 +1,3 @@
-import asyncio
 from copy import deepcopy
 from typing import TypedDict, List, Literal
 from dotenv import load_dotenv
@@ -16,6 +15,7 @@ from flask_talisman import Talisman
 import os
 import requests
 import prompts
+import asyncio
 
 
 # region Initialization
@@ -83,8 +83,6 @@ def search_web(item_to_search: str) -> list:
             safesearch='moderate',
             max_results=3
         )
-        for item in list(results):
-            print("Search result: " + str(item))
         return list(results)
 
 tools = [search_web]
@@ -101,6 +99,8 @@ class PreparationState(TypedDict):
     pages_to_personalize: list
     personalized_pages: list
     error_occurred: bool
+    error_message: str
+    is_retry_step: bool
 
 class PersonalizationProcessState(TypedDict):
     customer_information: dict
@@ -116,6 +116,10 @@ def fetch_data_node(state: PreparationState):
         - CMS assets
         - CDP customer information
     """
+    # Initialize error variables
+    state["error_occurred"] = False
+    state["is_retry_step"] = False
+
     # Create ContentStack API calls (CMS)
     cms_headers = {
         "api_key": config["cms"]["api_key"],
@@ -140,8 +144,8 @@ def fetch_data_node(state: PreparationState):
         state["page_list"] = page_list
         print("Retrieved pages from CMS")
     except requests.exceptions.RequestException as e:
-        print(f"An error occurred while retrieving pages from CMS: {str(e)}")
-        state["error_occurred"] = True
+        state["error_message"] = f"An error occurred while retrieving pages from CMS: {str(e)}"
+        handle_error_preparation_process(state, "FetchData")
         return state
 
     # Retrieve assets from Content Management System
@@ -153,8 +157,8 @@ def fetch_data_node(state: PreparationState):
         state["asset_list"] = asset_list
         print("Retrieved assets from CMS")
     except requests.exceptions.RequestException as e:
-        print(f"An error occurred while retrieving assets from CMS: {str(e)}")
-        state["error_occurred"] = True
+        state["error_message"] = f"An error occurred while retrieving assets from CMS: {str(e)}"
+        handle_error_preparation_process(state, "FetchData")
         return state
 
     # Create Lytics API calls (CDP)
@@ -176,7 +180,8 @@ def fetch_data_node(state: PreparationState):
             return state
 
         except requests.exceptions.RequestException as e:
-            print(f"An error occurred while retrieving customer information from CDP: {str(e)}")
+            state["error_message"] = f"An error occurred while retrieving customer information from CDP: {str(e)}"
+            handle_error_preparation_process(state, "FetchData")
             return state
     except:
         return state
@@ -184,16 +189,21 @@ def fetch_data_node(state: PreparationState):
 
 def analyze_company_node(state: PreparationState):
     """Analyze the email domain or company name of the user, to find information about the company and industry the user works in."""
+    # If an error has occured in one of the previous steps, quit the process
+    if state["error_occurred"]:
+        return state
 
     try:
         email_domain_to_analyze = state["customer_profile"]["data"]["email_domain"]
         is_email_analysis = True
 
     except:
-        if state["customer_organization"] is not None:
-            is_email_analysis = False
-        else:
-            print(f"An error occurred when analyzing the email domain: user has no IP organization or known email, personalization is not therefor not possible")
+        try:
+            if state["customer_organization"] is not None:
+                is_email_analysis = False
+        except:
+            state["error_message"] = f"An error occurred when analyzing the email domain: user has no IP organization or known email, personalization is not therefor not possible"
+            print(state["error_message"])
             state["error_occurred"] = True
             return state
 
@@ -201,6 +211,7 @@ def analyze_company_node(state: PreparationState):
     if is_email_analysis:
         # Check if the domain is private
         if email_domain_to_analyze == "gmail.com" or email_domain_to_analyze == "outlook.com":
+            state["error_message"] = f"Email address is not a business email, therefor domain can't be analyzed"
             print(f"Email address is not a business email, therefor domain can't be analyzed")
             state["error_occurred"] = True
             return state
@@ -232,7 +243,7 @@ def analyze_company_node(state: PreparationState):
         print("Analysis result: " + str(response))
 
         if response.industry != "not found":
-            customer_information = {"industry": response.industry}
+            customer_information = {"industry": response.industry, "customer_uid": state["customer_uid"]}
 
             if response.company_size != -1:
                 customer_information["company_size"] = response.company_size
@@ -240,25 +251,29 @@ def analyze_company_node(state: PreparationState):
                 customer_information["country"] = response.country
 
             state["customer_information"] = customer_information
-            print(state["customer_information"])
             return state
         else:
             if is_email_analysis:
-                print(f"Unable to find the industry of the email domain: {email_domain_to_analyze}")
+                state["error_message"] = f"Unable to find the industry of the email domain: {email_domain_to_analyze}"
+                handle_error_preparation_process(state, "analyzeCompany")
             else:
-                print(f"Unable to find the industry of the company: {state['customer_organization']}")
-            state["error_occurred"] = True
+                state["error_message"] = f"Unable to find the industry of the company: {state['customer_organization']}"
+                handle_error_preparation_process(state, "analyzeCompany")
+                analyze_company_node(state)
             return state
 
 
     except Exception as e:
-        print(f"An error occurred when analyzing the email domain: {str(e)}")
-        state["error_occurred"] = True
+        state["error_message"] = f"An error occurred when analyzing the email domain: {str(e)}"
+        handle_error_preparation_process(state, "analyzeCompany")
         return state
 
 
 def decide_pages_to_personalize_node(state: PreparationState):
     """Investigate the website pages and determine what pages (and components) could benefit from personalization."""
+    # If an error has occured in one of the previous steps, quit the process
+    if (state["error_occurred"]):
+        return state
 
     print("Deciding what pages to personalize...")
 
@@ -276,27 +291,32 @@ def decide_pages_to_personalize_node(state: PreparationState):
 
         # Retrieve page information connected to the title
         pages_to_personalize = []
+        titles_of_pages = []
         for page_title_to_personalize in response.pages_that_require_personalization:
             for page in state["page_list"]["entries"]:
                 if page_title_to_personalize == page["title"]:
                     if page["blocks"] != []:
-                        print("Chosen page: " + page["title"])
                         pages_to_personalize.append(page)
+                        titles_of_pages.append(page["title"])
                     else:
-                        print("Page " + page["title"] + " is not added as a chosen page because it has no blocks and can therefor not be personalized")
+                        print("Page " + page["title"] + " was chosen to personalize, but it has no blocks what can be personalized. Skipping...")
 
-
+        print("The pages to personalize have been chosen: " + str(titles_of_pages))
         state["pages_to_personalize"] = pages_to_personalize
         return state
 
     except Exception as e:
-        print(f"Agent was unable to decide what pages should be personalized: {str(e)}")
-        state["error_occurred"] = True
+        state["error_message"] = f"Agent was unable to decide what pages should be personalized: {str(e)}"
+        handle_error_preparation_process(state, "DecidePagesToPers")
         return state
 
 
 async def parallel_processing_node(state:PreparationState):
     """This node starts the personalization process of each selected page in parallel."""
+    # If an error has occured in one of the previous steps, quit the process
+    if state["error_occurred"]:
+        return state
+
     base_parameters = {
         "customer_information": state["customer_information"],
         "asset_list": state["asset_list"],
@@ -306,8 +326,7 @@ async def parallel_processing_node(state:PreparationState):
     tasks = []
     for page in state["pages_to_personalize"]:
         # Create a deepcopy of the base parameters and add the page that needs to be personalized
-        base = deepcopy(base_parameters)
-        request_parameters = base
+        request_parameters = deepcopy(base_parameters)
         request_parameters["page_to_personalize"] =  page
 
         # Start personalization process for page
@@ -317,15 +336,23 @@ async def parallel_processing_node(state:PreparationState):
 
     results = await asyncio.gather(*tasks)
     state["personalized_pages"] = results
-    print("Website personalization completed successfully.")
+
+    for page in results:
+        if "Error" in page["page_to_personalize"]:
+            state["error_message"] = page["page_to_personalize"].get("Error")
+            state["error_occurred"] = True
+            break
+
+    if state["error_occurred"]:
+        print("Website personalization failed.")
+    else:
+        print("Website personalization completed successfully.")
+
     return state
 
 
 def decide_components_to_personalize_node(state: PersonalizationProcessState):
     """Investigate the page to personalize and determine what components could benefit from personalization."""
-
-    print(f"[{state['page_to_personalize']['title']}] Deciding what components to personalize...")
-
     # Create agent with structured output
     class PersonalizationSteps(BaseModel):
         personalization_list: List[str]
@@ -339,36 +366,23 @@ def decide_components_to_personalize_node(state: PersonalizationProcessState):
                     page_blocks=state["page_to_personalize"]["blocks"]))
 
         # Create personalization_queue
-        if response.personalization_list is not None:
+        if response.personalization_list != []:
             state["personalization_queue"] = response.personalization_list
             state["personalization_queue"].append("save")
-            print (f"[{state['page_to_personalize']['title']}] Personalization steps to execute: {state['personalization_queue']}")
+            print (f"[{state['page_to_personalize']['title']}] Personalization steps to execute have been chosen: {state['personalization_queue']}")
         else:
-            if state["is_retry_step"]:
-                state["personalization_queue"] = []
-                print(f"[{state['page_to_personalize']['title']}] Error: Agent chose no components to personalize")
-                state["page_to_personalize"] = {"Error": "Agent chose no components to personalize"}
-            else:
-                print(f"[{state['page_to_personalize']['title']}] Error: Agent chose no components to personalize, trying again")
-                state["is_retry_step"] = True
+            handle_error_personalization_process(state, "Error: Agent chose no components to personalize")
 
         return state
 
     except Exception as e:
-        if state["is_retry_step"]:
-            state["personalization_queue"] = []
-            print(
-                f"[{state['page_to_personalize']['title']}] Agent was unable to decide what components should be personalized: {str(e)}")
-            state["page_to_personalize"] = {"Error": str(e)}
-        else:
-            print(
-                f"[{state['page_to_personalize']['title']}] Agent was unable to decide what components should be personalized, trying again. Error message: {str(e)}")
-            state["is_retry_step"] = True
+        handle_error_personalization_process(state, f"Agent was unable to decide what components should be personalized: {str(e)}")
+        return state
 
 
 def personalization_router_node(state: PersonalizationProcessState) -> Command[Literal["PersTexts", "PersImages", "PersElmtOrder", "SavePersPage", "__end__"]]:
     """Routes to the next node in the queue."""
-    if len(state["personalization_queue"]) != 0:
+    if state["personalization_queue"] != []:
         match state["personalization_queue"][0]:
             case "text":
                 goto = "PersTexts"
@@ -384,58 +398,57 @@ def personalization_router_node(state: PersonalizationProcessState) -> Command[L
     return Command(goto="__end__")
 
 
-def personalize_texts_node(state: PersonalizationProcessState):
+async def personalize_texts_node(state: PersonalizationProcessState):
     """Personalize text(s): generate a tailored text based on the content of the generic page and the customer's background."""
-    print(f"[{state['page_to_personalize']['title']}] Personalizing text...")
+    try:
+        block_list = state["page_to_personalize"]["blocks"]
+        tasks = []
 
-    # Define output structure
+        # Personalize all blocks at the same time
+        for block in block_list:
+            task = personalize_text(state["customer_information"], block_list, block)
+            tasks.append(task)
+
+        personalized_texts = await asyncio.gather(*tasks)
+
+        # Update the pages with the generated content
+        for i, text in enumerate(personalized_texts):
+            block_list[i]["block"]["copy"] = text.copytext
+            block_list[i]["block"]["title"] = text.title
+
+        # Update state with the updated block list
+        state["page_to_personalize"]["blocks"] = block_list
+
+        # Remove step from personalization queue
+        state["personalization_queue"].pop(0)
+        state["is_retry_step"] = False
+
+        print(f"[{state['page_to_personalize']['title']}] Text personalization completed.")
+        return state
+
+    except Exception as e:
+        handle_error_personalization_process(state, f"An error occurred when personalizing the text of page: {str(e)}")
+        return state
+
+
+async def personalize_text(customer_information, block_list, block_to_personalize):
+    """Async function that is called to personalize all texts at the same time."""
+    # Output structure
     class GeneratedText(BaseModel):
         title: str = Field(description="The generated title.")
         copytext: str = Field(description="The generated copy text.")
         explanation: str = Field(description="The reason why this text is better.")
 
-    # Generate personalized texts for block
-    try:
-        generated_titles = []
-        generated_copy_texts = []
-
-        for block in state["page_to_personalize"]["blocks"]:
-            generated_text = config["llm"].with_structured_output(GeneratedText).invoke(prompts.personalize_texts.format(
-                customer_industry = state["customer_information"]["industry"],
-                customer_information = state["customer_information"],
-                block_to_personalize = block,
-                block_list = state["page_to_personalize"]["blocks"]))
-
-            generated_titles.append(generated_text.title)
-            generated_copy_texts.append(generated_text.copytext)
-
-            #print("Personalized text: " + str(generated_text))
-
-        # Update the copy of the page to the generated text
-        for block_id, _ in enumerate(state["page_to_personalize"]["blocks"]):
-            state["page_to_personalize"]["blocks"][block_id]["block"]["copy"] = generated_copy_texts[block_id]
-            state["page_to_personalize"]["blocks"][block_id]["block"]["title"] = generated_titles[block_id]
-
-        # Remove step from personalization queue
-        state["personalization_queue"].pop(0)
-        state["is_retry_step"] = False
-        return state
-
-    except Exception as e:
-        if state["is_retry_step"]:
-            state["personalization_queue"] = []
-            print(f"[{state['page_to_personalize']['title']}] An error occurred when personalizing the text of page: {str(e)}")
-            state["page_to_personalize"] = {"Error": str(e)}
-        else:
-            print(f"[{state['page_to_personalize']['title']}] An error occurred when personalizing the text of page, trying again. Error message: {str(e)}")
-            state["is_retry_step"] = True
-        return state
+    # Generate the text
+    return await config["llm"].with_structured_output(GeneratedText).ainvoke(prompts.personalize_texts.format(
+        customer_industry=customer_information["industry"],
+        customer_information=customer_information,
+        block_to_personalize=block_to_personalize,
+        block_list=block_list))
 
 
 def personalize_images_node(state: PersonalizationProcessState):
     """Personalize image(s): choose the best fitting image for the content of the page and the customer's background."""
-    print(f"[{state['page_to_personalize']['title']}] Personalizing image...")
-
     # Strip assets information to essential data for LLM
     stripped_asset_list = []
     for asset in state["asset_list"]["assets"]:
@@ -479,16 +492,7 @@ def personalize_images_node(state: PersonalizationProcessState):
             for index, block in enumerate(block_details):
                 block["block"]["image"] = image_details[index]
         else:
-            if state["is_retry_step"]:
-                state["personalization_queue"] = []
-                print(
-                    f"[{state['page_to_personalize']['title']}] An error occurred when personalizing the image of page: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids})do not exist.")
-                state["page_to_personalize"] = {
-                    "Error": f"[{state['page_to_personalize']['title']}] Error: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist."}
-            else:
-                print(
-                    f"[{state['page_to_personalize']['title']}] One or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist, trying again.")
-                state["is_retry_step"] = True
+            handle_error_personalization_process(state, f"An error occurred when personalizing the image of page: one or more of the chosen images ({response.titles}) or blocks ({response.block_uids}) do not exist.")
             return state
 
         # Remove step from personalization queue
@@ -497,29 +501,20 @@ def personalize_images_node(state: PersonalizationProcessState):
         return state
 
     except Exception as e:
-        if state["is_retry_step"]:
-            state["personalization_queue"] = []
-            print(f"[{state['page_to_personalize']['title']}] An error occurred when personalizing the image of page: {str(e)}")
-            state["page_to_personalize"] = {"Error": str(e)}
-        else:
-            print(f"[{state['page_to_personalize']['title']}] An error occurred when personalizing the image of page, trying again. Error message: {str(e)}")
-            state["is_retry_step"] = True
+        handle_error_personalization_process(state, f"An error occurred when personalizing the image of page: {str(e)}")
         return state
 
 
 def personalize_element_order_node(state: PersonalizationProcessState):
     """Change the order of blocks on a page: change the blocks based on the content of the generic page and the customer's background."""
-    print(f"[{state['page_to_personalize']['title']}] Personalizing order of elements...")
-
     # Define output structure
     class GeneratedOrder(BaseModel):
         block_order: List[str] = Field(description="The order of the blocks by page uid.")
         explanation: str = Field(description="The reason why this order is better.")
 
     # Create stripped block list without the first element (first element should always be on top of page)
-    stripped_block_list = state["page_to_personalize"]["blocks"]
-    stripped_block = stripped_block_list[0]
-    del stripped_block_list[0]
+    stripped_block = state["page_to_personalize"]["blocks"][0]
+    stripped_block_list = state["page_to_personalize"]["blocks"][1:]
 
     # Generate personalized text
     try:
@@ -533,13 +528,17 @@ def personalize_element_order_node(state: PersonalizationProcessState):
         # Update the block order of the page to the generated order
         updated_block_list = [stripped_block]
 
-        for uid in response.block_order:
-            for block in stripped_block_list:
-                if block["block"]["_metadata"]["uid"] == uid:
-                    updated_block_list.append(block)
-                    break
+        if response.block_order != []:
+            for uid in response.block_order:
+                for block in stripped_block_list:
+                    if block["block"]["_metadata"]["uid"] == uid:
+                        updated_block_list.append(block)
+                        break
 
-        state["page_to_personalize"]["blocks"] = updated_block_list
+            state["page_to_personalize"]["blocks"] = updated_block_list
+        else:
+            handle_error_personalization_process(state, f"An error occurred when personalizing the order of the elements of page: No block uids have been returned by the agent")
+            return state
 
         # Remove step from personalization queue
         state["personalization_queue"].pop(0)
@@ -547,52 +546,77 @@ def personalize_element_order_node(state: PersonalizationProcessState):
         return state
 
     except Exception as e:
-        if state["is_retry_step"]:
-            print(f"[{state['page_to_personalize']['title']}] An error occurred when personalizing the order of the elements of page: {str(e)}")
-            state["page_to_personalize"] = {"Error": str(e)}
-            state["personalization_queue"] = []
-        else:
-            print(f"[{state['page_to_personalize']['title']}] An error occurred when personalizing the order of the elements of page, trying again. Error message: {str(e)}")
-            state["is_retry_step"] = True
+        handle_error_personalization_process(state, f"An error occurred when personalizing the order of the elements of page: {str(e)}")
         return state
 
 
 def save_personalized_page_node(state: PersonalizationProcessState):
     """Save the personalized page in the database."""
-    print(f"[{state['page_to_personalize']['title']}] Saving personalized page...")
-
     # Prepare database connection
     database = config["db"]["client"][config["db"]["db_name"]]
     collection = database["pages"]
 
     try:
+        # Prepare page by adding the customer uid
+        state["page_to_personalize"]["customer_uid"] = state["customer_information"]["customer_uid"]
         generated_page = state["page_to_personalize"]
+
 
         # Save personalized page in the database
         if collection.count_documents({'title': generated_page["title"]}) == 0:
             response = collection.insert_one(generated_page)
-            print(f"Successfully saved personalized {state['page_to_personalize']['title']} page in database with ID: {response.inserted_id}")
+            print(f"[{state['page_to_personalize']['title']}] Successfully saved the new personalized page in database (ID: {response.inserted_id})")
         else:
             # Replace the page if it already exists
             response = collection.replace_one(
                 {'title': generated_page['title']},
                 generated_page
             )
-            print(f"Successfully updated existing personalized {state['page_to_personalize']['title']} page in database")
+            print(f"[{state['page_to_personalize']['title']}] Successfully updated an existing personalized page in database")
 
         # Remove step from personalization queue
         state["personalization_queue"].pop(0)
         return state
 
     except Exception as e:
-        if state["is_retry_step"]:
-            print(f"[{state['page_to_personalize']['title']}] An error occurred while saving the personalized page in the database: {str(e)}")
-            state["personalization_queue"] = []
-        else:
-            print(
-                f"[{state['page_to_personalize']['title']}] An error occurred while saving the personalized page in the database, trying again. Error message: {str(e)}")
-            state["is_retry_step"] = True
+        handle_error_personalization_process(state, f"An error occurred while saving the personalized page in the database: {str(e)}")
         return state
+
+
+def handle_error_personalization_process(state: PersonalizationProcessState, error_message:str):
+    """Handle an error during the personalization process."""
+    # If it is a retried step return an error
+    if state["is_retry_step"]:
+        state["personalization_queue"] = []
+        print(
+            f"[{state['page_to_personalize']['title']}] {error_message}")
+        state["page_to_personalize"] = {"Error": error_message}
+    # If it is a first error try to execute the node again
+    else:
+        print(
+            f"[{state['page_to_personalize']['title']}] {error_message}. Trying again...")
+        state["is_retry_step"] = True
+
+
+def handle_error_preparation_process(state: PreparationState, node: str):
+    """Handle an error during the preparation process."""
+    # If it is a retried step or an error occurred during the fetch data node, return the error_occurred to stop the program
+    if state["is_retry_step"] or node == "FetchData":
+        print(state["error_message"])
+        state["error_occurred"] = True
+    # If it is a first error of one of the other nodes, try again
+    else:
+        print(state["error_message"] + ". Trying again...")
+        state["is_retry_step"] = True
+
+        match node:
+            case "analyzeCompany":
+                analyze_company_node(state)
+            case "DecidePagesToPers":
+                decide_pages_to_personalize_node(state)
+
+
+
 # endregion
 
 # region Create graphs
@@ -631,7 +655,7 @@ persFlow.add_edge("SavePersPage", END)
 personalization_graph = persFlow.compile()
 # endregion
 
-# Run Flask server to check for incoming personalization requests
+# Run Flask server to check for incoming personalization requests and personalized page retrievals
 app = Flask(__name__)
 Talisman(app, force_https=True)
 auth = HTTPBasicAuth()
@@ -652,30 +676,30 @@ async def personalization_request():
     if "customer_organization" in payload or "customer_uid" in payload:
         # Call the agent and check for errors when done
         result = await preparation_graph.ainvoke(payload)
-        if "Error" in result["personalized_pages"]:
-            return {"Internal Server Error": result["personalized_page"]["Error"]}, 500
+        if result["error_occurred"]:
+            return {"Internal Server Error": str(result["error_message"])}, 500
         else:
             return {"Success": "The personalization process has been completed successfully."}, 200
     else:
         return {"Bad Request Error": "No customer_id or customer_organization in payload."}, 400
 
-@app.route('/personalize/<customer_uid>', methods=['GET'])
+@app.route('/personalize/<customer_uid>/<slug>', methods=['GET'])
 @auth.login_required
-def retrieve_personalized_pages(customer_uid: str):
-    if customer_uid is None:
-        return {"Bad Request Error": "No customer_uid provided."}, 400
+def retrieve_personalized_pages(customer_uid: str, slug: str):
+    if customer_uid is None or slug is None:
+        return {"Bad Request Error": "Customer_uid or slug is missing."}, 400
     else:
         try:
             database = config["db"]["client"][config["db"]["db_name"]]
             collection = database["pages"]
-
-            cursor = collection.find({"customer_uid": customer_uid}, {"_id": 0})
+            slug = "/" + slug
+            cursor = collection.find({"customer_uid": customer_uid, "url": slug}, {"_id": 0})
             personalized_pages = list(cursor)
 
             if len(personalized_pages) > 0:
                 return personalized_pages, 200
             else:
-                return {"Not Found Error": "No personalized pages have been found for this user."}, 404
+                return {"Not Found Error": f"No personalized page for {slug} has been found for customer {customer_uid}."}, 404
         except Exception as e:
             return {"Internal Server Error": str(e)}, 500
 

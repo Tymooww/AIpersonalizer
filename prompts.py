@@ -32,6 +32,7 @@ decide_pages_to_personalize = """Your task is to analyze and decide which pages 
                     - Personalization is most effective on pages that have products or links to other pages listed on them.
                     - Pages without text don't need 'text' personalization
                     - Pages with less then 2 blocks don't need 'order' personalization
+                    - Pages with no images don't need 'image' personalization
                     - Different industries care about different aspects
                     
                     Provide: 
@@ -52,6 +53,7 @@ decide_components_to_personalize = """Your task is to analyze which components s
                     Consider:
                     - Pages without text don't need 'text' personalization
                     - Pages with less then 2 blocks don't need 'order' personalization
+                    - Pages with no images don't need 'image' personalization
                     - Different industries care about different aspects
                     - Personalization is most effective on pages that have products listed on them.
                     
