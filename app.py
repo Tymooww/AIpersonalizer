@@ -697,7 +697,7 @@ def retrieve_personalized_pages(customer_uid: str, slug: str):
             personalized_pages = list(cursor)
 
             if len(personalized_pages) > 0:
-                return personalized_pages, 200
+                return personalized_pages[0], 200
             else:
                 return {"Not Found Error": f"No personalized page for {slug} has been found for customer {customer_uid}."}, 404
         except Exception as e:
