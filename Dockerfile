@@ -21,5 +21,4 @@ COPY . .
 
 EXPOSE 8080
 
-ENV FLASK_APP=app.py
 CMD ["python","-u","app.py"]
